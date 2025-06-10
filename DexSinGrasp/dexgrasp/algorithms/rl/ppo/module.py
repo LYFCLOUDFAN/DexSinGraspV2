@@ -160,6 +160,8 @@ class ActorCritic(nn.Module): # for ppo
 
     # act without gradient, with covariance
     def act(self, observations, states):
+        observations = observations.float()
+        
         if self.use_pc and not self.freeze_backbone:
             if self.backbone_type =="transpn":
                 pc = observations[:, 300:300+6144].reshape(-1, 1024, 6)
@@ -171,6 +173,7 @@ class ActorCritic(nn.Module): # for ppo
                 mask = observations[:, 300+6144:].reshape(-1, 1024, 2)
                 pc_with_mask = torch.cat([pc, mask], dim = -1)
                 pc_feature = self.backbone(pc_with_mask)[0].reshape(-1, 128)
+            pc_feature = pc_feature.float()
             observations = torch.cat([observations[:, :191], observations[:, 207:236], pc_feature], dim=1)
             actions_mean = self.actor(observations)
         elif self.use_pc and self.freeze_backbone:
@@ -185,6 +188,7 @@ class ActorCritic(nn.Module): # for ppo
                     mask = observations[:, 300+6144:].reshape(-1, 1024, 2)
                     pc_with_mask = torch.cat([pc, mask], dim = -1)
                     pc_feature = self.backbone(pc_with_mask)[0].reshape(-1, 128)
+            pc_feature = pc_feature.float()
             observations = torch.cat([observations[:, :191], observations[:, 207:236], pc_feature], dim=1)
             actions_mean = self.actor(observations)
         else:
@@ -197,13 +201,17 @@ class ActorCritic(nn.Module): # for ppo
         actions_log_prob = distribution.log_prob(actions)
 
         # act value net
-        if self.asymmetric: value = self.critic(states)
-        else: value = self.critic(observations)
+        if self.asymmetric: 
+            states = states.float()
+            value = self.critic(states)
+        else: 
+            value = self.critic(observations)
 
         return actions.detach(), actions_log_prob.detach(), value.detach(), actions_mean.detach(), self.log_std.repeat(actions_mean.shape[0], 1).detach()
 
     # act without gradient, without covariance
     def act_inference(self, observations, act_value=False):
+        observations = observations.float()
 
         if self.use_pc and not self.freeze_backbone:
             if self.backbone_type =="transpn":
@@ -216,6 +224,7 @@ class ActorCritic(nn.Module): # for ppo
                 mask = observations[:, 300+6144:].reshape(-1, 1024, 2)
                 pc_with_mask = torch.cat([pc, mask], dim = -1)
                 pc_feature = self.backbone(pc_with_mask)[0].reshape(-1, 128)
+            pc_feature = pc_feature.float()
             observations = torch.cat([observations[:, :191], observations[:, 207:236], pc_feature], dim=1)
             actions_mean = self.actor(observations)
         elif self.use_pc and self.freeze_backbone:
@@ -230,6 +239,7 @@ class ActorCritic(nn.Module): # for ppo
                     mask = observations[:, 300+6144:].reshape(-1, 1024, 2)
                     pc_with_mask = torch.cat([pc, mask], dim = -1)
                     pc_feature = self.backbone(pc_with_mask)[0].reshape(-1, 128)
+            pc_feature = pc_feature.float()
             observations = torch.cat([observations[:, :191], observations[:, 207:236], pc_feature], dim=1)
             actions_mean = self.actor(observations)
         else:
@@ -240,6 +250,8 @@ class ActorCritic(nn.Module): # for ppo
 
     # evaluate current actor model with previous collected actions
     def evaluate(self, observations, states, actions):
+        observations = observations.float()
+        
         if self.use_pc and not self.freeze_backbone:
             if self.backbone_type =="transpn":
                 pc = observations[:, 300:300+6144].reshape(-1, 1024, 6)
@@ -251,6 +263,7 @@ class ActorCritic(nn.Module): # for ppo
                 mask = observations[:, 300+6144:].reshape(-1, 1024, 2)
                 pc_with_mask = torch.cat([pc, mask], dim = -1)
                 pc_feature = self.backbone(pc_with_mask)[0].reshape(-1, 128)
+            pc_feature = pc_feature.float()
             observations = torch.cat([observations[:, :191], observations[:, 207:236], pc_feature], dim=1)
             actions_mean = self.actor(observations)
         elif self.use_pc and self.freeze_backbone:
@@ -265,6 +278,8 @@ class ActorCritic(nn.Module): # for ppo
                     mask = observations[:, 300+6144:].reshape(-1, 1024, 2)
                     pc_with_mask = torch.cat([pc, mask], dim = -1)
                     pc_feature = self.backbone(pc_with_mask)[0].reshape(-1, 128)
+            # Ensure pc_feature is also float32
+            pc_feature = pc_feature.float()
             observations = torch.cat([observations[:, :191], observations[:, 207:236], pc_feature], dim=1)
             actions_mean = self.actor(observations)
         else:
@@ -277,8 +292,11 @@ class ActorCritic(nn.Module): # for ppo
         entropy = distribution.entropy()
 
         # evaluate value net
-        if self.asymmetric: value = self.critic(states)
-        else: value = self.critic(observations)
+        if self.asymmetric: 
+            states = states.float()
+            value = self.critic(states)
+        else: 
+            value = self.critic(observations)
 
         return actions_log_prob, entropy, value, actions_mean, self.log_std.repeat(actions_mean.shape[0], 1)
 
