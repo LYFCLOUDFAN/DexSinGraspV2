@@ -1,16 +1,16 @@
 # used to create the object
-name: ShadowHandFunctionalManipulationUnderarm
+name: XArmAllegroHandFunctionalManipulationUnderarm
 
 physics_engine: ${..physics_engine}
 
 defaults:
-  - env/observationSpecs: default
-  - env/actionSpecs: default
+  - env/observationSpecs: xarm_allegro
+  - env/actionSpecs: xarm_allegro
 
 # if given, will override the device setting in gym.
 env:
   seed: ${resolve_default:0,${...seed}}
-  numEnvs: ${resolve_default:16384,${...num_envs}}
+  numEnvs: ${resolve_default:32,${...num_envs}}
   envSpacing: 0.75
   episodeLength: 300
   enableDebugVis: False
@@ -30,7 +30,7 @@ env:
   useRelativeControl: True
   dofSpeedScale: 20.0
   actionsMovingAverage: 1.0
-  controlFrequencyInv: 1 # 60 Hz
+  controlFrequencyInv: 2 # 30 Hz
 
   startPositionNoise: 0.01
   startRotationNoise: 0.0
@@ -53,9 +53,10 @@ env:
   forceDecay: 0.99
   forceDecayInterval: 0.08
 
-  # reward -> dictionary
-  rewardType: ${resolve_default:succrew+rotrew+actionpen+mutual+fjcontact,${...reward_type}}
-  # rewardType: "succrew+rotrew+actionpen+mutual+fjcontact+nominal"
+  # reward -> dictionary  
+  # For singulation task, use: "succrew+tilt+slide+neighbor+stability+actionpen"
+  rewardType: ${resolve_default:succrew+tilt+slide+neighbor+stability+actionpen,${...reward_type}}
+  # Legacy: "succrew+rotrew+actionpen+mutual+fjcontact+nominal"
   relativePartReward: False
   distRewardScale: -10.0
   rotRewardScale: 1.0
@@ -78,6 +79,18 @@ env:
   fallPenalty: 0.0
   curriculumMode: "no" # pose mode: set initial pose easy to reach; stage mode: set initial reward for pgm; set to no for evaluation
 
+  # Singulation-specific reward parameters
+  tiltRewardScale: 1.0  # Reward for tilting object along x-axis (-45 degrees goal)
+  slideRewardScale: 1.0  # Reward for sliding object forward along z-axis (20-30cm goal)
+  neighborStabilityPenaltyScale: -5.0  # Penalty for moving non-target objects
+  stabilityPenaltyScale: -2.0  # Penalty for unwanted Y/Z axis rotations (keep object stable)
+  
+  # Goal pose parameters for singulation task
+  goalTranslationZ: 0.25  # 25cm forward along z-axis
+  goalRotationX: -0.80  # -45 degrees in radians around x-axis
+  goalTolerancePosition: 0.05  # 5cm tolerance for position
+  goalToleranceRotation: 0.087  # 5 degrees tolerance for rotation (in radians)
+
   observationType: "full_state" # can be "openai", "full_no_vel", "full", "full_state"
 
   enableContactSensors: True
@@ -97,9 +110,10 @@ env:
 
   observationSpace:
     ${resolve_default:[],${...obs_space}}
-    # - "shadow_hand_dof_velocity"
-    # - "shadow_hand_position"
-    # - "shadow_hand_orientation"
+    # - "allegro_hand_dof_position"
+    # - "allegro_hand_dof_velocity"
+    # - "xarm_hand_position"
+    # - "xarm_hand_orientation"
     # - "fingertip_position"
     # - "fingertip_orientation"
     # - "fingertip_linear_velocity"
@@ -136,14 +150,13 @@ env:
   velocityObservationScale: 0.2
   actionSpace:
     ${resolve_default:[],${...action_space}}
-    # must follow following order: wrist_translation, wrist_rotation, hand_rotaion
-    # - "wrist_translation"
-    # - "wrist_rotation"
+    # must follow following order: xarm_translation, xarm_rotation, hand_rotation
+    # - "xarm_translation"
+    # - "xarm_rotation"
     # - "hand_rotation"
 
   numObjects: ${resolve_default:3,${...num_objects}}
   numObjectsPerEnv: ${resolve_default:1,${...num_objects_per_env}}
-  # actualNumObjectsPerEnv: ${resolve_default:1,${...actual_num_objects_per_env}}
   objectSpacing: 0.15
   resampleObject: ${resolve_default:False,${...resample_object}}
 
@@ -186,21 +199,8 @@ task:
     # schedule: "linear"  # "linear" will linearly interpolate between no rand and max rand
     #     # schedule_steps: 40000
     actor_params:
-      # shadow_hand:
+      # xarm_allegro_hand:
       #   color: True
-      #   tendon_properties:
-      #     damping:
-      #       range: [0.3, 3.0]
-      #       operation: "scaling"
-      #       distribution: "loguniform"
-      #       # schedule: "linear"  # "linear" will scale the current random sample by `min(current num steps, schedule_steps) / schedule_steps`
-      #       # schedule_steps: 30000
-      #     stiffness:
-      #       range: [0.75, 1.5]
-      #       operation: "scaling"
-      #       distribution: "loguniform"
-      #       # schedule: "linear"  # "linear" will scale the current random sample by `min(current num steps, schedule_steps) / schedule_steps`
-      #       # schedule_steps: 30000
       #   dof_properties:
       #     damping:
       #       range: [0.3, 3.0]
@@ -268,7 +268,7 @@ task:
       #       # schedule_steps: 30000
 
 sim:
-  dt: 0.033333 # 1/60
+  dt: 0.01667 # 1/60
   substeps: 2
   up_axis: "z"
   use_gpu_pipeline: ${eq:${...pipeline},"gpu"}

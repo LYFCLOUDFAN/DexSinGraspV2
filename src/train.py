@@ -1,3 +1,11 @@
+import os
+import os
+if os.getenv("debug") != "":
+    import debugpy
+    debugpy.listen(("localhost", 9999))
+    print("Waiting for debugger attach")
+    debugpy.wait_for_client()
+
 import isaacgym
 from hydra._internal.utils import get_args_parser
 from isaacgymenvs.utils.utils import set_np_formatting, set_seed
@@ -75,8 +83,15 @@ if __name__ == "__main__":
     # if args.web_visualizer_port != -1:
     #     visualizer = Visualizer(args.web_visualizer_port)
 
-    sim_device = f"cuda:{args.run_device_id}"
-    rl_device = f"cuda:{args.run_device_id}"
+    # Set devices based on run_device_id
+    if args.run_device_id == -1:
+        # CPU mode
+        sim_device = "cpu"
+        rl_device = "cpu"
+    else:
+        # GPU mode
+        sim_device = f"cuda:{args.run_device_id}"
+        rl_device = f"cuda:{args.run_device_id}"
 
     cfg_train, logdir = load_cfg(args)
 
@@ -136,32 +151,62 @@ if __name__ == "__main__":
                 # "pointcloud_wrt_palm"
             ]
         elif "env_mode=pgm" in args.overrides:
-            obs_space = [
-                # "shadow_hand_position",
-                # "shadow_hand_orientation",
-                "ur_endeffector_position",
-                "ur_endeffector_orientation",
-                "shadow_hand_dof_position",
-                "shadow_hand_dof_velocity",
-                "fingertip_position_wrt_palm",
-                "fingertip_orientation_wrt_palm",
-                "fingertip_linear_velocity",
-                "fingertip_angular_velocity",
-                "object_position_wrt_palm",
-                "object_orientation_wrt_palm",
-                "object_position",
-                "object_orientation",
-                "object_linear_velocity",
-                "object_angular_velocity",
-                "object_target_relposecontact",
-                "position_error",
-                "orientation_error",
-                "fingerjoint_error",
-                "object_bbox",
-                # "object_category",
-                # "pointcloud_wrt_palm"
-            ]
-            action_space = ["wrist_translation", "wrist_rotation", "hand_rotation"]
+            # Check if using XArm Allegro task or Shadow Hand task
+            if "task=XArmAllegroHandFunctionalManipulationUnderarm" in args.overrides:
+                obs_space = [
+                    # Hand state
+                    "xarm_endeffector_position",
+                    "xarm_endeffector_orientation", 
+                    "xarm_endeffector_linear_velocity",
+                    "xarm_endeffector_angular_velocity",
+                    "allegro_hand_dof_position",
+                    "allegro_hand_dof_velocity",
+                    # Fingertip information for contact detection
+                    "fingertip_position_wrt_palm",
+                    "fingertip_orientation_wrt_palm",
+                    "fingertip_linear_velocity",
+                    "fingertip_angular_velocity",
+                    # Object state (current target object)
+                    "object_position_wrt_palm",
+                    "object_orientation_wrt_palm",
+                    "object_position",
+                    "object_orientation",
+                    "object_linear_velocity",
+                    "object_angular_velocity",
+                    "nearest_non_target_object_position",
+                    "nearest_non_target_object_orientation",
+                    # Scene understanding
+                    "object_bbox",
+                    # Contact information
+                    "tactile",
+                    # Action
+                    "action",
+                ]
+                action_space = ["wrist_translation", "wrist_rotation", "hand_rotation"]
+            else:
+                # Default Shadow Hand configuration
+                obs_space = [
+                    "ur_endeffector_position",
+                    "ur_endeffector_orientation",
+                    "shadow_hand_dof_position",
+                    "shadow_hand_dof_velocity",
+                    "fingertip_position_wrt_palm",
+                    "fingertip_orientation_wrt_palm",
+                    "fingertip_linear_velocity",
+                    "fingertip_angular_velocity",
+                    "object_position_wrt_palm",
+                    "object_orientation_wrt_palm",
+                    "object_position",
+                    "object_orientation",
+                    "object_linear_velocity",
+                    "object_angular_velocity",
+                    "object_target_relposecontact",
+                    "position_error",
+                    "orientation_error",
+                    "fingerjoint_error",
+                    "object_bbox",
+                ]
+                action_space = ["wrist_translation", "wrist_rotation", "hand_rotation"]
         # training parameter
         cfg_train["learn"]["nsteps"] = 8
         cfg_train["learn"]["noptepochs"] = 5
@@ -170,15 +215,25 @@ if __name__ == "__main__":
         cfg_train["learn"]["gamma"] = 0.99
         cfg_train["learn"]["clip_range"] = 0.1
     elif args.exp_name == "ppo_real":
-        obs_space = [
-            "ur_endeffector_position",
-            "ur_endeffector_orientation",
-            "shadow_hand_dof_position",
-            "object_position_wrt_palm",
-            "object_orientation_wrt_palm",
-            "object_target_relposecontact",
-            # "object_bbox",
-        ]
+        # Check if using XArm Allegro task or Shadow Hand task
+        if "task=XArmAllegroHandFunctionalManipulationUnderarm" in args.overrides:
+            obs_space = [
+                "xarm_endeffector_position",
+                "xarm_endeffector_orientation",
+                "allegro_hand_dof_position",
+                "object_position_wrt_palm",
+                "object_orientation_wrt_palm",
+                "object_target_relposecontact",
+            ]
+        else:
+            obs_space = [
+                "ur_endeffector_position",
+                "ur_endeffector_orientation",
+                "shadow_hand_dof_position",
+                "object_position_wrt_palm",
+                "object_orientation_wrt_palm",
+                "object_target_relposecontact",
+            ]
         action_space = ["wrist_translation", "wrist_rotation", "hand_rotation"]
         # training parameter
         cfg_train["learn"]["nsteps"] = 8
@@ -200,8 +255,8 @@ if __name__ == "__main__":
     args.overrides.append(f"action_space={action_space}")
     # Load and wrap the Isaac Gym environment
     env = load_isaacgym_env(
-        task_name="ShadowHandFunctionalManipulationUnderarm", args=args
-    )  # preview 3 and 4 use the same loader
+        task_name="", args=args
+    )  # task_name will be loaded from hydra config
     # env = wrap_env(env)
     """
     load agent

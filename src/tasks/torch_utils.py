@@ -148,6 +148,32 @@ def quat_diff_rad(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     # 2 * torch.acos(torch.abs(mul[:, -1]))
     return 2.0 * torch.asin(torch.clamp(torch.norm(mul[:, 0:3], p=2, dim=-1), max=1.0))
 
+@torch.jit.script
+def quat_to_6d(q: torch.Tensor) -> torch.Tensor:
+    """Convert quaternion to 6D representation.
+    
+    Args:
+        q: Quaternion, shape (N, ..., 4) in [x, y, z, w] format
+    Returns:
+        6D representation, shape (N, ..., 6)
+    """
+    original_shape = q.shape[:-1]
+    q_flat = q.view(-1, 4)
+    
+    x, y, z, w = q_flat[:, 0], q_flat[:, 1], q_flat[:, 2], q_flat[:, 3]
+    
+    # Compute first two columns of rotation matrix
+    col1_x = 1.0 - 2.0 * (y * y + z * z)
+    col1_y = 2.0 * (x * y + w * z)
+    col1_z = 2.0 * (x * z - w * y)
+    
+    col2_x = 2.0 * (x * y - w * z)
+    col2_y = 1.0 - 2.0 * (x * x + z * z)
+    col2_z = 2.0 * (y * z + w * x)
+    
+    # Stack results and reshape to original dimensions + 6
+    result_flat = torch.stack([col1_x, col1_y, col1_z, col2_x, col2_y, col2_z], dim=-1)
+    return result_flat.view(original_shape + (6,))
 
 @torch.jit.script
 def scale_transform(x: torch.Tensor, lower: torch.Tensor, upper: torch.Tensor) -> torch.Tensor:

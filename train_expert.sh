@@ -1,13 +1,15 @@
 python src/train.py \
     headless=False \
     env_mode=pgm \
-    env_info=False \
-    num_envs=12000 \
-    num_objects=-1 \
-    num_objects_per_env=1 \
-    graphics_device_id=-1 \
+    env_info=True \
+    num_envs=12 \
+    num_objects=10 \
+    num_objects_per_env=10 \
+    graphics_device_id=0 \
     split='train' \
     cluster=0 \
+    task=ShadowHandFunctionalManipulationUnderarm \
+    train=ShadowHandFunctionalManipulationUnderarmPPO \
     task.env.datasetMetainfoPath="data/oakink_filtered_metainfo.csv" \
     task.env.datasetPoseLevelSampling=True \
     --seed=0 \

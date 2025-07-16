@@ -17,6 +17,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import wandb
 import yaml
 from gym.spaces import Space
 from ipdb import set_trace
@@ -286,7 +287,7 @@ class PPO:
                 """Bahavior cloning."""
                 self.bc_loss = nn.MSELoss()
                 self.bc_optimizer = optim.Adam(
-                    filter(lambda p: p.requires_grad, self.actor_critic.parameters()), lr=self.learning_rate
+                    filter(lambda p: p.requires_grad, self.actor_critic.parameters()), lr=self.learning_rate, eps=1e-5
                 )
                 self.bc_bz = 256
                 self.bc_epoch = 30
@@ -753,9 +754,9 @@ class PPO:
 
                                 test_times += len(new_done_env_ids)
                                 reward_all.extend(rews[new_done_env_ids].cpu().numpy())
-                                pos_dist[new_done_env_ids] = infos["pos_dist"][new_done_env_ids]
-                                rot_dist[new_done_env_ids] = infos["rot_dist"][new_done_env_ids]
-                                contact_dist[new_done_env_ids] = infos["fj_dist"][new_done_env_ids]
+                                # pos_dist[new_done_env_ids] = infos["pos_dist"][new_done_env_ids]
+                                # rot_dist[new_done_env_ids] = infos["rot_dist"][new_done_env_ids]
+                                # contact_dist[new_done_env_ids] = infos["fj_dist"][new_done_env_ids]
 
                                 eval_done_envs[new_done_env_ids] = 1
                                 success_env_ids = (

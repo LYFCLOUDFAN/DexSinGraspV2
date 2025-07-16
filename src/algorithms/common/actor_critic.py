@@ -181,12 +181,61 @@ class ActorCritic(nn.Module):
                 critic_hidden_dim + self.action_dim, 1, activation, [], activate_for_last_layer=False
             )
 
+        self._initialize_weights()
+
     @staticmethod
     def init_weights(sequential, scales):
         [
             torch.nn.init.orthogonal_(module.weight, gain=scales[idx])
             for idx, module in enumerate(mod for mod in sequential if isinstance(mod, nn.Linear))
         ]
+
+    def _initialize_weights(self):
+
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                if getattr(m, 'bias', None) is not None:
+                    torch.nn.init.zeros_(m.bias)
+
+        # Actor networks
+        self.init_weights(self.actor_state_enc, [np.sqrt(2)] * len(self.actor_state_enc))
+        if hasattr(self, 'actor_state_fuser'):
+            self.init_weights(self.actor_state_fuser, [np.sqrt(2)] * len(self.actor_state_fuser))
+        if hasattr(self, 'actor_tactile_enc'):
+            self.init_weights(self.actor_tactile_enc, [np.sqrt(2)] * len(self.actor_tactile_enc))
+        if hasattr(self, 'actor_pcl_enc'):
+            self.init_weights(self.actor_pcl_enc, [np.sqrt(2)] * len(self.actor_pcl_enc))
+        if hasattr(self, 'actor_grad_enc'):
+            self.init_weights(self.actor_grad_enc, [np.sqrt(2)] * len(self.actor_grad_enc))
+        if hasattr(self, 'actor_fuse'):
+            self.init_weights(self.actor_fuse, [np.sqrt(2)] * len(self.actor_fuse))
+
+        # Critic networks
+        self.init_weights(self.critic_state_enc, [np.sqrt(2)] * len(self.critic_state_enc))
+        if hasattr(self, 'critic_fuser'):
+            self.init_weights(self.critic_fuser, [np.sqrt(2)] * len(self.critic_fuser))
+        if hasattr(self, 'critic_tactile_enc'):
+            self.init_weights(self.critic_tactile_enc, [np.sqrt(2)] * len(self.critic_tactile_enc))
+        if hasattr(self, 'critic_pcl_enc'):
+            self.init_weights(self.critic_pcl_enc, [np.sqrt(2)] * len(self.critic_pcl_enc))
+        if hasattr(self, 'critic_grad_enc'):
+            self.init_weights(self.critic_grad_enc, [np.sqrt(2)] * len(self.critic_grad_enc))
+        if hasattr(self, 'critic_fuse'):
+            self.init_weights(self.critic_fuse, [np.sqrt(2)] * len(self.critic_fuse))
+
+        actor_output_linear = [m for m in self.actor_output if isinstance(m, nn.Linear)]
+        if actor_output_linear:
+            torch.nn.init.orthogonal_(actor_output_linear[-1].weight, gain=0.01)  # type: ignore
+
+        critic_output_linear = [m for m in self.critic_output if isinstance(m, nn.Linear)]
+        if critic_output_linear:
+            torch.nn.init.orthogonal_(critic_output_linear[-1].weight, gain=1.0)  # type: ignore
+
+        # ILAD
+        if hasattr(self, 'additional_critic_mlp1'):
+            additional_critic_linear = [m for m in self.additional_critic_mlp1 if isinstance(m, nn.Linear)]
+            if additional_critic_linear:
+                torch.nn.init.orthogonal_(additional_critic_linear[-1].weight, gain=1.0)  # type: ignore
 
     def build_block(self, input_dim, output_dim, activation, hidden_dim, activate_for_last_layer=True):
         layers = []

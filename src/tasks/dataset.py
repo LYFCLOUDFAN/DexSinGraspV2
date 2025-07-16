@@ -371,3 +371,137 @@ def point_to_mesh_distance(
     sdf_values = sdf[indices, coords_x, coords_y, coords_z]
 
     return (sdf_values if ndim == 3 else sdf_values.squeeze(1)).to(device)
+
+class BoxGridDataset(FunctionalGraspingDataset):
+    """Simple dataset for box grid singulation task."""
+    
+    dof_names: List[str] = [
+        "joint0.0", "joint1.0", "joint2.0", "joint3.0",
+        "joint4.0", "joint5.0", "joint6.0", "joint7.0",
+        "joint8.0", "joint9.0", "joint10.0", "joint11.0",
+        "joint12.0", "joint13.0", "joint14.0", "joint15.0",
+    ]
+    
+    def __init__(
+        self,
+        grid_rows: int = 1,
+        grid_cols: int = 5,
+        grid_layers: int = 1,
+        box_width: float = 0.04,
+        box_depth: float = 0.16,
+        box_height: float = 0.24,
+        device: Optional[Union[str, torch.device]] = None,
+        pcl_num: int = 1024,
+    ):
+        super().__init__()
+        
+        self.grid_rows = grid_rows
+        self.grid_cols = grid_cols
+        self.grid_layers = grid_layers
+        self.box_width = box_width
+        self.box_depth = box_depth
+        self.box_height = box_height
+        self.device = device
+        self.pcl_num = pcl_num
+        
+        self.num_objects = grid_rows * grid_cols * grid_layers
+        self.object_codes = [f"box_{i}" for i in range(self.num_objects)]
+        self.manipulated_codes = deepcopy(self.object_codes)
+        
+
+        self._category_matrix = torch.ones(self.num_objects, 1, device=self.device)
+        self._pointclouds = self._create_box_pointclouds()
+        
+        self.object_cat = "box"
+        self.max_per_cat = -1
+        self.object_geo_level = None
+        self.object_scale = None
+        self.label_paths = ["box_grid_singulation"]
+        
+        self._sdf_fields = torch.zeros(self.num_objects, 200, 200, 200, device=device)
+        
+        print(f">>> BoxGridDataset initialized with {self.num_objects} boxes")
+    
+    def _create_box_pointclouds(self) -> torch.Tensor:
+        """Create pointclouds for box objects by sampling points on the 6 faces."""
+        # Sample random points uniformly across all objects
+        points = torch.rand(self.num_objects, self.pcl_num, 3, device=self.device)
+        
+        # Scale to box dimensions and center at origin
+        points[:, :, 0] = points[:, :, 0] * self.box_width - self.box_width / 2    # x
+        points[:, :, 1] = points[:, :, 1] * self.box_depth - self.box_depth / 2    # y  
+        points[:, :, 2] = points[:, :, 2] * self.box_height - self.box_height / 2  # z
+        
+        n_per_face = self.pcl_num // 6
+        
+        # z boundaries
+        points[:, :n_per_face, 2] = self.box_height / 2
+        points[:, n_per_face:2*n_per_face, 2] = -self.box_height / 2
+        
+        # y boundaries
+        points[:, 2*n_per_face:3*n_per_face, 1] = self.box_depth / 2
+        points[:, 3*n_per_face:4*n_per_face, 1] = -self.box_depth / 2
+        
+        # x boundaries
+        points[:, 4*n_per_face:5*n_per_face, 0] = self.box_width / 2
+        points[:, 5*n_per_face:, 0] = -self.box_width / 2
+        
+        return points
+    
+    def get_boundingbox(self, pointclouds: torch.Tensor) -> torch.Tensor:
+        """Computes the bounding box of a point cloud.
+
+        Args:
+            pointclouds (torch.Tensor): Point cloud tensor of shape (..., N, 3)
+
+        Returns:
+            torch.Tensor: Bounding box tensor of shape (..., 6)
+        """
+        corner_max = torch.max(pointclouds, dim=-2)[0]
+        corner_min = torch.min(pointclouds, dim=-2)[0]
+        return torch.cat((corner_max, corner_min), dim=-1).to(self.device)
+    
+    def sample(self, object_indices: torch.LongTensor) -> Dict[str, Any]:
+        """Sample data for given object indices."""
+        assert object_indices.dim() == 1, "Object indices must be a 1D tensor"
+        assert object_indices.dtype == torch.long, "Object indices must be a 1D tensor of longs"
+        assert object_indices.max() < self.num_objects and object_indices.min() >= 0, "Object indices out of range"
+        
+        pointclouds = self._pointclouds[object_indices]
+        if pointclouds.shape[1] > self.pcl_num:
+            pointclouds = sample_farthest_points(pointclouds, K=self.pcl_num)[0]
+        
+        boundingbox = self.get_boundingbox(pointclouds)
+        category_onehot = self._category_matrix[object_indices]
+        
+        # For singulation task, we don't need complex joint configurations
+        # Just return dummy values for compatibility
+        batch_size = object_indices.shape[0]
+        dummy_joints = torch.zeros(batch_size, 16, device=self.device)  # 16 DOF for Allegro hand
+        dummy_poses = torch.zeros(batch_size, 7, device=self.device)  # position (3) + quaternion (4)
+        dummy_poses[:, 6] = 1.0  # Set w component of quaternion to 1
+        
+        return {
+            "joints": dummy_joints,
+            "pose": dummy_poses,
+            "pointcloud": pointclouds,
+            "index": object_indices,
+            "object_index": object_indices,
+            "bbox": boundingbox,
+            "category_onehot": category_onehot,
+            "grasp": ["box_grasp"] * batch_size,
+            "code": [self.object_codes[i] for i in object_indices.cpu().numpy()],
+            "cluster": np.zeros(batch_size, dtype=np.int32),  # All boxes in same cluster
+        }
+    
+    def get_object_index(self, object_code: str) -> int:
+        """Get the index of an object by its code."""
+        return self.object_codes.index(object_code)
+    
+    def resample(self, num_samples: int) -> List[str]:
+        """Resample objects for the singulation task."""
+        # For singulation task, we just cycle through the available boxes
+        codes = []
+        for i in range(num_samples):
+            codes.append(self.object_codes[i % self.num_objects])
+        return codes

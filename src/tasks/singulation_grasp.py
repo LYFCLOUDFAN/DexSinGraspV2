@@ -4,7 +4,7 @@ import os
 import random
 import warnings
 from collections import OrderedDict, deque
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Union, Tuple
 
 import cv2
 import numpy as np
@@ -66,8 +66,8 @@ add_noise = False
 STATIC_TARGET = False
 
 
-class ShadowHandUnderarmDimensions(enum.Enum):
-    """Dimension constants for Isaac Gym."""
+class XArmAllegroHandUnderarmDimensions(enum.Enum):
+    """Dimension constants for Isaac Gym with xArm6 + Allegro Hand."""
 
     # general state
     # cartesian position (3) + quaternion orientation (4)
@@ -79,15 +79,14 @@ class ShadowHandUnderarmDimensions(enum.Enum):
     # force (3) + torque (3)
     WRENCH_DIM = 6
 
-    NUM_FINGERTIPS = 5
-    NUM_DOFS = 30
+    NUM_FINGERTIPS = 4  # Allegro hand has 4 fingertips
+    NUM_DOFS = 22  # xArm6 (6 DOF) + Allegro hand (16 DOF)
 
     WRIST_TRAN = 3
     WRIST_ROT = 3
-    if fix_wrist:
-        HAND_ACTUATED_DIM = 18
-    else:
-        HAND_ACTUATED_DIM = 20
+    
+    # Allegro hand actuated dimensions
+    HAND_ACTUATED_DIM = 16
 
 
 class ForceSensorSpec:
@@ -146,112 +145,118 @@ class AggregateTracker:
         self.aggregate_shapes += shapes
 
 
-class ShadowHandFunctionalManipulationUnderarm(VecTask):
+class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
     # constants
-    _asset_root: os.PathLike = os.path.join(os.path.dirname(find_dotenv()), "assets")
+    _asset_root: os.PathLike = os.path.join(os.path.dirname(find_dotenv()), "assets/urdf")
     _data_root: os.PathLike = os.path.join(os.path.dirname(find_dotenv()), "data")
-    _shadow_hand_right_asset_file: os.PathLike = os.path.join("shadow_robot", "shadow_hand_right.urdf")
-    _shadow_hand_left_asset_file: os.PathLike = os.path.join("shadow_robot", "shadow_hand_left.urdf")
-    _ur10e_shadow_hand_right_asset_file: os.PathLike = os.path.join("shadow_robot", "ur10e_shadow_hand_right.urdf")
-    _ur10e_shadow_hand_left_asset_file: os.PathLike = os.path.join("shadow_robot", "ur10e_shadow_hand_left.urdf")
+    _allegro_hand_right_asset_file: os.PathLike = os.path.join("hands", "allegro_hand", "allegro_hand_right.urdf")
+    _allegro_hand_left_asset_file: os.PathLike = os.path.join("hands", "allegro_hand", "allegro_hand_left.urdf")
+    _xarm_allegro_hand_right_asset_file: str = "xarm6_allegro_right.urdf"
+    _xarm_allegro_hand_left_asset_file: str = "xarm6_allegro_left.urdf"
 
     # fmt: off
-    _ur_dof_names: List[str] = [
-        "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
-        "wrist_1_joint", "wrist_2_joint", "wrist_3_joint",
+    _xarm_dof_names: List[str] = [
+        "joint1", "joint2", "joint3", "joint4", "joint5", "joint6",
     ]
-    _tendon_dof_names: List[str] = ["FFJ1", "MFJ1", "RFJ1", "LFJ1"]
-    _coupled_dof_names: List[str] = ["FFJ2", "MFJ2", "RFJ2", "LFJ2"]
-    _fingers_actuated_dof_names: List[str] = [
-        "FFJ4", "FFJ3", "FFJ2",
-        "LFJ5", "LFJ4", "LFJ3", "LFJ2",
-        "MFJ4", "MFJ3", "MFJ2",
-        "RFJ4", "RFJ3", "RFJ2",
+    
+    # Allegro hand DOF names (16 DOF total)
+    _allegro_hand_dof_names: List[str] = [
+        "joint_0.0", "joint_1.0", "joint_2.0", "joint_3.0",  # finger 0 (index)
+        "joint_4.0", "joint_5.0", "joint_6.0", "joint_7.0",  # finger 1 (middle)
+        "joint_8.0", "joint_9.0", "joint_10.0", "joint_11.0",  # finger 2 (ring)
+        "joint_12.0", "joint_13.0", "joint_14.0", "joint_15.0",  # thumb
     ]
-    _thumb_actuated_dof_names: List[str] = ["THJ5", "THJ4", "THJ3", "THJ2", "THJ1"]
-    _digits_actuated_dof_names: List[str] = _fingers_actuated_dof_names + _thumb_actuated_dof_names
+    
+    # Group allegro hand DOF names by finger
+    _allegro_finger0_dof_names: List[str] = ["joint_0.0", "joint_1.0", "joint_2.0", "joint_3.0"]
+    _allegro_finger1_dof_names: List[str] = ["joint_4.0", "joint_5.0", "joint_6.0", "joint_7.0"]
+    _allegro_finger2_dof_names: List[str] = ["joint_8.0", "joint_9.0", "joint_10.0", "joint_11.0"]
+    _allegro_thumb_dof_names: List[str] = ["joint_12.0", "joint_13.0", "joint_14.0", "joint_15.0"]
+    
+    _allegro_fingers_dof_names: List[str] = (
+        _allegro_finger0_dof_names + _allegro_finger1_dof_names + _allegro_finger2_dof_names
+    )
+    _allegro_digits_dof_names: List[str] = _allegro_fingers_dof_names + _allegro_thumb_dof_names
     # fmt: on
 
-    _fingertips: List[str] = ["ffdistal", "lfdistal", "mfdistal", "rfdistal", "thdistal"]
-    _shadow_hand_center_prim: str = "rh_palm"
-    _shadow_hand_mfknuckle_prim: str = "rh_mfknuckle"
+    _arm_links: List[str] = ["link_base", "link1", "link2", "link3", "link4", "link5", "link6"]
+    _hand_links: List[str] = [
+        "base_link", "palm", "wrist",
+        "link_0.0", "link_1.0", "link_2.0", "link_3.0",
+        "link_4.0", "link_5.0", "link_6.0", "link_7.0",
+        "link_8.0", "link_9.0", "link_10.0", "link_11.0",
+        "link_12.0", "link_13.0", "link_14.0", "link_15.0",
+    ]
+    _fingertips: List[str] = ["link_3.0_tip", "link_7.0_tip", "link_11.0_tip", "link_15.0_tip"]
+    _allegro_hand_center_prim: str = "base_link"
+    _allegro_hand_palm_prim: str = "palm"
     # fmt: off
     _keypoints: List[str] = [
         "palm",
-        "thbase", "thmiddle", "thdistal", "thtip",
-        "ffknuckle", "ffmiddle", "ffdistal", "fftip",
-        "mfknuckle", "mfmiddle", "mfdistal", "mftip",
-        "rfknuckle", "rfmiddle", "rfdistal", "rftip",
-        "lfknuckle", "lfmiddle", "lfdistal", "lftip",
+        "link_12.0", "link_13.0", "link_14.0", "link_15.0_tip",  # thumb
+        "link_0.0", "link_1.0", "link_2.0", "link_3.0_tip",     # finger 0 (index)
+        "link_4.0", "link_5.0", "link_6.0", "link_7.0_tip",     # finger 1 (middle)  
+        "link_8.0", "link_9.0", "link_10.0", "link_11.0_tip",   # finger 2 (ring)
     ]
     # fmt: on
 
-    _ur10e_right_init_dof_positions: Dict[str, float] = {
-        "shoulder_pan_joint": 0.0,
-        "shoulder_lift_joint": -1.25,
-        "elbow_joint": 1.25 + np.pi / 4,
-        "wrist_1_joint": -np.pi / 4,
-        "wrist_2_joint": np.pi / 2,
-        "wrist_3_joint": np.pi / 2,
+    _xarm_right_init_dof_positions: Dict[str, float] = {
+        "joint1": 0.0,
+        "joint2": -1.0,
+        "joint3": -0.5,
+        "joint4": 0.0,
+        "joint5": 0.0,
+        "joint6": 0.0,
     }
-    _ur10e_left_init_dof_positions: Dict[str, float] = {
-        "shoulder_pan_joint": 0.0,
-        "shoulder_lift_joint": -np.pi + 1.25,
-        "elbow_joint": -1.25 - np.pi / 4,
-        "wrist_1_joint": -np.pi * 3 / 4,
-        "wrist_2_joint": -np.pi / 2,
-        "wrist_3_joint": 0.0,
+    _xarm_left_init_dof_positions: Dict[str, float] = {
+        "joint1": 0.0,
+        "joint2": -1.0,
+        "joint3": -0.5,
+        "joint4": 0.0,
+        "joint5": 0.0,
+        "joint6": 0.0,
     }
 
-    _ur10e_right_init_position = [0.02, 0.30, 0.60]
-    _ur10e_right_init_j_eef = [
-        [8.3911e-01, -1.3380e-03, 2.3293e-03, 7.3128e-04, -2.0655e-01, 5.9929e-09],
-        [1.6963e-01, -2.1895e-01, 3.8122e-01, 1.1968e-01, 6.5827e-04, 2.1502e-11],
-        [-2.5361e-08, -8.3806e-01, -7.1484e-01, -2.0664e-01, 4.7235e-07, 5.1006e-08],
-        [-4.3984e-14, 9.9998e-01, 9.9998e-01, 9.9998e-01, -4.8232e-06, -3.1870e-03],
-        [1.4951e-07, -6.1102e-03, -6.1102e-03, -6.1102e-03, -7.9584e-04, -9.9999e-01],
-        [1.0000e00, -1.2013e-07, -1.4674e-07, -1.2649e-07, -1.0000e00, 7.9564e-04],
-    ]
-    _ur10e_right_init_orientation = [0.707, 0.0, 0.0, 0.707]
+    _xarm_right_init_position = [0.00, 0.70, 0.00]
+    _xarm_right_init_orientation = [0.0, 0.0, -np.sqrt(0.5), np.sqrt(0.5)]
     _target_hand_palm_pose = [-0.4, 0.053, 0.810, 0.0, -0.707, 0.707, 0.0]
     _current_hand_palm_pose = [0.021, 0.052, 0.608, 0.0, -0.707, 0.707, 0.0]
-    _hand_geo_center = [0.008, -0.046, 0.6]
-    _object_z = 0.13
+    _hand_geo_center = [0.0, 0.0, 0.0]
+    _object_z = 0.5
     _object_nominal_orientation = [0.0, 0.0, 1.0, 0.0]
-    _table_x_length = 1.0
-    _table_y_length = 0.8
-    _table_thickness = 0.05
-    _table_pose = [0.0, 0.0, 0.3]
+    _table_x_length = 0.5
+    _table_y_length = 0.5
+    _table_thickness = 0.02
+    _table_pose = [0.0, 0.0, 0.4]
 
-    _max_ur_endeffector_pos_vel = 1.0
-    _max_ur_endeffector_rot_vel = torch.pi
+    _max_xarm_endeffector_pos_vel = 1.0
+    _max_xarm_endeffector_rot_vel = torch.pi
 
     _palm2forearm_quat = [0.0, 0.0, 0.0, 1.0]
     _palm2forearm_pos = [0.0, -0.01, 0.247]
 
-    _dims: ShadowHandUnderarmDimensions = ShadowHandUnderarmDimensions
+    _dims = XArmAllegroHandUnderarmDimensions
     _observation_specs: Sequence[ObservationSpec] = []
     _action_specs: Sequence[ActionSpec] = []
     _force_sensor_specs: Sequence[ForceSensorSpec] = [
-        ForceSensorSpec("ffdistal", "rh_ffdistal"),
-        ForceSensorSpec("lfdistal", "rh_lfdistal"),
-        ForceSensorSpec("mfdistal", "rh_mfdistal"),
-        ForceSensorSpec("rfdistal", "rh_rfdistal"),
-        ForceSensorSpec("thdistal", "rh_thdistal"),
+        ForceSensorSpec("link_3.0_tip", "link_3.0_tip"),
+        ForceSensorSpec("link_7.0_tip", "link_7.0_tip"),
+        ForceSensorSpec("link_11.0_tip", "link_11.0_tip"),
+        ForceSensorSpec("link_15.0_tip", "link_15.0_tip"),
     ]
 
     # TODO: add description about tensor shapes
-    shadow_hand_index: int
+    allegro_hand_index: int
 
-    shadow_hand_dof_lower_limits: Tensor
-    shadow_hand_dof_upper_limits: Tensor
-    shadow_hand_dof_init_positions: Tensor
-    shadow_hand_dof_init_velocities: Tensor
+    allegro_hand_dof_lower_limits: Tensor
+    allegro_hand_dof_upper_limits: Tensor
+    allegro_hand_dof_init_positions: Tensor
+    allegro_hand_dof_init_velocities: Tensor
 
-    shadow_hand_dof_start: int
-    shadow_hand_dof_end: int
-    target_shadow_hand_dof_start: int
-    target_shadow_hand_dof_end: int
+    allegro_hand_dof_start: int
+    allegro_hand_dof_end: int
+    target_allegro_hand_dof_start: int
+    target_allegro_hand_dof_end: int
 
     # buffers to hold intermediate results
     root_states: Tensor
@@ -260,11 +265,11 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
     root_linear_velocities: Tensor
     root_angular_velocities: Tensor
 
-    shadow_hand_root_states: Tensor
-    shadow_hand_root_positions: Tensor
-    shadow_hand_root_orientations: Tensor
-    shadow_hand_root_linear_velocities: Tensor
-    shadow_hand_root_angular_velocities: Tensor
+    allegro_hand_root_states: Tensor
+    allegro_hand_root_positions: Tensor
+    allegro_hand_root_orientations: Tensor
+    allegro_hand_root_linear_velocities: Tensor
+    allegro_hand_root_angular_velocities: Tensor
 
     scene_object_root_states: Tensor
     scene_object_root_positions: Tensor
@@ -272,11 +277,11 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
     scene_object_root_linear_velocities: Tensor
     scene_object_root_angular_velocities: Tensor
 
-    shadow_hand_dof_positions: Tensor
-    shadow_hand_dof_velocities: Tensor
+    allegro_hand_dof_positions: Tensor
+    allegro_hand_dof_velocities: Tensor
 
-    target_shadow_hand_dof_positions: Tensor
-    target_shadow_hand_dof_velocities: Tensor
+    target_allegro_hand_dof_positions: Tensor
+    target_allegro_hand_dof_velocities: Tensor
 
     # tensors need to be refreshed manually
     fingertip_states: Tensor
@@ -299,9 +304,16 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
     successes: Tensor
     consecutive_successes: Tensor
 
-    # define object spacing and number of objects per environment
     object_spacing: float
     num_objects_per_env: int
+
+    _box_width: float = 0.04
+    _box_depth: float = 0.16
+    _box_height: float = 0.24
+    _grid_rows: int = 1
+    _grid_cols: int = 5
+    _grid_layers: int = 1
+    _box_spacing: float = 0.005
 
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render):
         seed = cfg["env"]["seed"]
@@ -328,11 +340,11 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         self.contact_sensor_threshold = self.cfg["env"]["contactSensorThreshold"]
 
         # Section for functional grasping dataset
-        self.dataset_dir = self.cfg["env"]["datasetDir"]
-        self.dataset_metainfo_path = self.cfg["env"]["datasetMetainfoPath"]
-        self.dataset_skipcode_path = self.cfg["env"]["datasetSkipcodePath"]
-        self.dataset_pose_level_sampling = self.cfg["env"]["datasetPoseLevelSampling"]
-        self.dataset_queries = self.cfg["env"]["datasetQueries"]
+        # self.dataset_dir = self.cfg["env"]["datasetDir"]
+        # self.dataset_metainfo_path = self.cfg["env"]["datasetMetainfoPath"]
+        # self.dataset_skipcode_path = self.cfg["env"]["datasetSkipcodePath"]
+        # self.dataset_pose_level_sampling = self.cfg["env"]["datasetPoseLevelSampling"]
+        # self.dataset_queries = self.cfg["env"]["datasetQueries"]
 
         self.object_spacing = self.cfg["env"]["objectSpacing"]
         self.num_objects = self.cfg["env"]["numObjects"]
@@ -374,9 +386,24 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         self.time_step_penatly = self.cfg["env"]["timeStepPenatly"]
         self.manipulability_penalty_scale = self.cfg["env"]["manipulabilityPenaltyScale"]
 
+        # Singulation-specific reward parameters
+        self.tilt_reward_scale = self.cfg["env"].get("tiltRewardScale", 1.0)
+        self.slide_reward_scale = self.cfg["env"].get("slideRewardScale", 1.0) 
+        self.neighbor_stability_penalty_scale = self.cfg["env"].get("neighborStabilityPenaltyScale", -5.0)
+        self.stability_penalty_scale = self.cfg["env"].get("stabilityPenaltyScale", -2.0)
+        
+        # Goal pose parameters for singulation task
+        self.goal_translation_y = self.cfg["env"].get("goalTranslationY", 0.25)
+        self.goal_rotation_x = self.cfg["env"].get("goalRotationX", -0.80)  # -45 degrees
+        self.goal_tolerance_position = self.cfg["env"].get("goalTolerancePosition", 0.05)
+        self.goal_tolerance_rotation = self.cfg["env"].get("goalToleranceRotation", 0.087)  # 5 degrees
+        
+ 
+
         self.debug_viz = self.cfg["env"]["enableDebugVis"]
         self.env_info_logging = self.cfg["logging"]["envInfo"]
 
+        
         self.max_episode_length = self.cfg["env"]["episodeLength"]
         self.reset_time = self.cfg["env"].get("resetTime", -1.0)
         self.print_success_stat = self.cfg["env"]["printNumSuccesses"]
@@ -418,6 +445,8 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         )
 
         self.num_object_points = self.cfg["env"]["numObjectPointCloudPoints"]
+        
+        self.num_nearest_non_targets = self.cfg['env']['observationSpecs']['__dim__']['num_nearest_non_targets']
 
         self.up_axis = "z"
 
@@ -428,58 +457,59 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         self.env_mode = self.cfg["env"]["envMode"]
         self.curriculum_mode = self.cfg["env"]["curriculumMode"]
 
-        self.render_target = self.cfg["env"].get("renderTarget", True)
+        self.render_target = self.cfg["env"].get("renderTarget", False)
 
         self.manipulated_object_codes = None
         self.resample_object = self.cfg["env"]["resampleObject"]
-
+            
+            
         self.aggregate_tracker = AggregateTracker()
 
         if self.env_mode == "orn":
             # self.cfg["env"]["actionSpace"] = ["hand_rotation", "wrist_3_joint"]
             self.object_targets = torch.zeros(self.cfg["env"]["numEnvs"], 4, device=sim_device)
             # if "wrist_3_joint" not in self.cfg["env"]["actionSpace"]:
-            self._ur10e_right_init_dof_positions = {
-                "shoulder_pan_joint": -6.2564e-03,
-                "shoulder_lift_joint": -1.3661e00,
-                "elbow_joint": 1.8371e00,
-                "wrist_1_joint": -4.5858e-01,
-                "wrist_2_joint": 1.5662e00,
-                "wrist_3_joint": -1.6500e-03,
+            self._xarm_right_init_dof_positions = {
+                "joint1": 0.0,
+                "joint2":-1.0,
+                "joint3":-0.5,
+                "joint4": 0.0,
+                "joint5": 0.0,
+                "joint6": 0.0,
             }
         elif self.env_mode == "relpose":
             # self.cfg["env"]["actionSpace"] = ["hand_rotation"]
             self.object_targets = torch.zeros(self.cfg["env"]["numEnvs"], 3 + 4, device=sim_device)
             # if "wrist_3_joint" not in self.cfg["env"]["actionSpace"]:
-            self._ur10e_right_init_dof_positions = {
-                "shoulder_pan_joint": -6.2564e-03,
-                "shoulder_lift_joint": -1.3661e00,
-                "elbow_joint": 1.8371e00,
-                "wrist_1_joint": -4.5858e-01,
-                "wrist_2_joint": 1.5662e00,
-                "wrist_3_joint": -1.6500e-03,
+            self._xarm_right_init_dof_positions = {
+                "joint1": 0.0,
+                "joint2":-1.0,
+                "joint3":-0.5,
+                "joint4": 0.0,
+                "joint5":0.0,
+                "joint6": 0.0,
             }
         elif self.env_mode == "relposecontact":
             # self.cfg["env"]["actionSpace"] = ["hand_rotation"]
             self.object_targets = torch.zeros(self.cfg["env"]["numEnvs"], 3 + 4 + 18, device=sim_device)
             # if "wrist_3_joint" not in self.cfg["env"]["actionSpace"]:
-            self._ur10e_right_init_dof_positions = {
-                "shoulder_pan_joint": -6.2564e-03,
-                "shoulder_lift_joint": -1.3661e00,
-                "elbow_joint": 1.8371e00,
-                "wrist_1_joint": -4.5858e-01,
-                "wrist_2_joint": 1.5662e00,
-                "wrist_3_joint": -1.6500e-03,
+            self._xarm_right_init_dof_positions = {
+                "joint1": 0.0,
+                "joint2":-1,
+                "joint3":-0.5,
+                "joint4": 0.0,
+                "joint5":0.0,
+                "joint6": 0.0,
             }
         elif self.env_mode == "pgm":
             self.object_targets = torch.zeros(self.cfg["env"]["numEnvs"], 3 + 4 + 18, device=sim_device)
-            self._ur10e_right_init_dof_positions = {
-                "shoulder_pan_joint": -6.2564e-03,
-                "shoulder_lift_joint": -1.3661e00,
-                "elbow_joint": 1.8371e00,
-                "wrist_1_joint": -4.5858e-01,
-                "wrist_2_joint": 1.5662e00,
-                "wrist_3_joint": -3.14,
+            self._xarm_right_init_dof_positions = {
+                "joint1": 0.0,
+                "joint2":-1,
+                "joint3":-0.5,
+                "joint4": 0.0,
+                "joint5":0.0,
+                "joint6": 0.0,
             }
             self._hand_geo_center = [0, 0, 0]
             self._object_z = 0.01 + self._table_thickness / 2
@@ -522,10 +552,11 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
 
         self.num_fingertips = len(self._fingertips)
 
-        self.__create_functional_grasping_dataset(device=sim_device)
+        # self.__create_functional_grasping_dataset(device=sim_device)
+        self.__create_box_grid_dataset(device=sim_device)
         self.__configure_mdp_spaces()
 
-        super().__init__(
+        super().__init__( # create_sim
             config=self.cfg,
             rl_device=rl_device,
             sim_device=sim_device,
@@ -536,7 +567,8 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         )
         # reconfig viewer
         self.__configure_viewer()
-        self.__reset_grasping_joint_indices()
+        #HACK: not used
+        # self.__reset_grasping_joint_indices()
         self.__reset_action_indices()
 
         # retrieve generic tensor descriptors for the simulation
@@ -553,7 +585,7 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         # - force_sensor_states: [num_envs * num_force_sensors, 6]
         _force_sensor_states: torch.Tensor = self.gym.acquire_force_sensor_tensor(self.sim)
         # - jacobians: [num_envs, num_prims - 1, 6, num_dofs]
-        _jacobians: torch.Tensor = self.gym.acquire_jacobian_tensor(self.sim, "shadow_hand")
+        _jacobians: torch.Tensor = self.gym.acquire_jacobian_tensor(self.sim, "allegro_hand")
 
         if self.env_info_logging:
             print("root_states.shape: ", _root_states.shape)
@@ -586,10 +618,10 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         if self.num_force_sensors > 0:
             self.force_sensor_states: torch.Tensor = gymtorch.wrap_tensor(_force_sensor_states)
         else:
-            self.force_sensor_states = None
+            self.force_sensor_states: Optional[torch.Tensor] = None
 
-        forearm_index = self.gym.find_asset_rigid_body_index(self.gym_assets["current"]["robot"]["asset"], "rh_forearm")
-        # jacobian entries corresponding to rh_forearm
+        forearm_index = self.gym.find_asset_rigid_body_index(self.gym_assets["current"]["robot"]["asset"], "link6")
+        # jacobian entries corresponding to link6
         self.j_eef = self.jacobians[:, forearm_index - 1, :, :6]
 
         self.gym.refresh_actor_root_state_tensor(self.sim)
@@ -610,85 +642,77 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
 
         root_states = self.root_states.view(self.num_envs, self.num_actors, 13)
 
-        self.shadow_hand_root_states = root_states[:, self.shadow_hand_index, :]
-        self.shadow_hand_root_positions = self.shadow_hand_root_states[:, 0:3]
-        self.shadow_hand_root_orientations = self.shadow_hand_root_states[:, 3:7]
-        self.shadow_hand_root_linear_velocities = self.shadow_hand_root_states[:, 7:10]
-        self.shadow_hand_root_angular_velocities = self.shadow_hand_root_states[:, 10:13]
+        self.allegro_hand_root_states = root_states[:, self.allegro_hand_index, :]
+        self.allegro_hand_root_positions = self.allegro_hand_root_states[:, 0:3]
+        self.allegro_hand_root_orientations = self.allegro_hand_root_states[:, 3:7]
+        self.allegro_hand_root_linear_velocities = self.allegro_hand_root_states[:, 7:10]
+        self.allegro_hand_root_angular_velocities = self.allegro_hand_root_states[:, 10:13]
 
-        if self.render_target:
-            self.target_shadow_hand_root_states = root_states[:, self.target_shadow_hand_index, :]
-            self.target_shadow_hand_root_positions = self.target_shadow_hand_root_states[:, 0:3]
-            self.target_shadow_hand_root_orientations = self.target_shadow_hand_root_states[:, 3:7]
-            self.target_shadow_hand_root_linear_velocities = self.target_shadow_hand_root_states[:, 7:10]
-            self.target_shadow_hand_root_angular_velocities = self.target_shadow_hand_root_states[:, 10:13]
-
-        self.scene_object_root_states = root_states[:, self.object_actor_start : self.object_actor_end, :]
+        self.scene_object_root_states = torch.gather(root_states, dim=1, index=self.scene_object_indices.unsqueeze(-1).expand(-1, -1, 13))
         self.scene_object_root_positions = self.scene_object_root_states[:, :, 0:3]
         self.scene_object_root_orientations = self.scene_object_root_states[:, :, 3:7]
         self.scene_object_root_linear_velocities = self.scene_object_root_states[:, :, 7:10]
         self.scene_object_root_angular_velocities = self.scene_object_root_states[:, :, 10:13]
 
-        if self.render_target:
-            self.scene_target_object_root_states = root_states[
-                :, self.target_object_actor_start : self.target_object_actor_end, :
-            ]
-            self.scene_target_object_root_positions = self.scene_target_object_root_states[:, :, 0:3]
-            self.scene_target_object_root_orientations = self.scene_target_object_root_states[:, :, 3:7]
-            self.scene_target_object_root_linear_velocities = self.scene_target_object_root_states[:, :, 7:10]
-            self.scene_target_object_root_angular_velocities = self.scene_target_object_root_states[:, :, 10:13]
-
         dof_states = self.dof_states.view(self.num_envs, self.num_dofs, 2)
 
-        self.shadow_hand_dof_positions = dof_states[:, self.shadow_hand_dof_start : self.shadow_hand_dof_end, 0]
-        self.shadow_hand_dof_velocities = dof_states[:, self.shadow_hand_dof_start : self.shadow_hand_dof_end, 1]
+        self.allegro_hand_dof_positions = dof_states[:, self.allegro_hand_dof_start : self.allegro_hand_dof_end, 0]
+        self.allegro_hand_dof_velocities = dof_states[:, self.allegro_hand_dof_start : self.allegro_hand_dof_end, 1]
 
-        if self.render_target:
-            self.target_shadow_hand_dof_positions = dof_states[
-                :, self.target_shadow_hand_dof_start : self.target_shadow_hand_dof_end, 0
-            ]
-            self.target_shadow_hand_dof_velocities = dof_states[
-                :, self.target_shadow_hand_dof_start : self.target_shadow_hand_dof_end, 1
-            ]
 
         rigid_body_states = self.rigid_body_states.view(self.num_envs, self.num_rigid_bodies, 13)
 
-        self.shadow_hand_rigid_body_states = rigid_body_states[
-            :, self.shadow_hand_rigid_body_start : self.shadow_hand_rigid_body_end, :
+        self.allegro_hand_rigid_body_states = rigid_body_states[
+            :, self.allegro_hand_rigid_body_start : self.allegro_hand_rigid_body_end, :
         ]
-        self.shadow_hand_rigid_body_positions = self.shadow_hand_rigid_body_states[..., 0:3]
-        self.shadow_hand_rigid_body_orientations = self.shadow_hand_rigid_body_states[..., 3:7]
+        self.allegro_hand_rigid_body_positions = self.allegro_hand_rigid_body_states[..., 0:3]
+        self.allegro_hand_rigid_body_orientations = self.allegro_hand_rigid_body_states[..., 3:7]
+        self.allegro_hand_rigid_body_linear_velocities = self.allegro_hand_rigid_body_states[..., 7:10]
+        self.allegro_hand_rigid_body_angular_velocities = self.allegro_hand_rigid_body_states[..., 10:13]
 
-        self.shadow_hand_center_states = self.shadow_hand_rigid_body_states[:, self.shadow_center_index, :]
-        self.shadow_hand_center_positions = self.shadow_hand_center_states[:, 0:3]
-        self.shadow_hand_center_orientations = self.shadow_hand_center_states[:, 3:7]
+        self.allegro_hand_center_states = self.allegro_hand_rigid_body_states[:, self.allegro_center_index, :]
+        self.allegro_hand_center_positions = self.allegro_hand_center_states[:, 0:3]
+        self.allegro_hand_center_orientations = self.allegro_hand_center_states[:, 3:7]
 
-        self.shadow_hand_mfknuckle_positions = self.shadow_hand_rigid_body_states[:, self.shadow_mfknuckle_index, 0:3]
 
         endeffector_index = self.gym.find_asset_rigid_body_index(
-            self.gym_assets["current"]["robot"]["asset"], "rh_forearm"
+            self.gym_assets["current"]["robot"]["asset"], "link6"
         )
-        self.endeffector_states = self.shadow_hand_rigid_body_states[:, endeffector_index, :]
-        self.endeffector_positions = self.shadow_hand_rigid_body_positions[:, endeffector_index, :]
-        self.endeffector_orientations = self.shadow_hand_rigid_body_orientations[:, endeffector_index, :]
+        self.endeffector_states = self.allegro_hand_rigid_body_states[:, endeffector_index, :]
+        self.endeffector_positions = self.allegro_hand_rigid_body_positions[:, endeffector_index, :]
+        self.endeffector_orientations = self.allegro_hand_rigid_body_orientations[:, endeffector_index, :]
+        self.endeffector_linear_velocities = self.allegro_hand_rigid_body_linear_velocities[:, endeffector_index, :]
+        self.endeffector_angular_velocities = self.allegro_hand_rigid_body_angular_velocities[:, endeffector_index, :]
+        
+        self.nearest_non_target_object_positions = torch.zeros((self.num_envs, self.num_nearest_non_targets, 3), device=self.device)
+        self.nearest_non_target_object_orientations = torch.zeros((self.num_envs, self.num_nearest_non_targets, 4), device=self.device)
+        
+        # Pre-allocate intermediate tensors for nearest non-target object computation (performance optimization)
+        self.max_non_targets = self.num_objects_per_env - 1  # Maximum possible non-target objects per env
+        self.k_nearest = min(self.num_nearest_non_targets, self.max_non_targets)
+        
+        # Intermediate tensors for _refresh_sim_tensors
+        self._target_positions = torch.zeros((self.num_envs, 3), device=self.device)
+        self._gather_indices_pos = torch.zeros((self.num_envs, self.max_non_targets, 3), dtype=torch.long, device=self.device)
+        self._gather_indices_ori = torch.zeros((self.num_envs, self.max_non_targets, 4), dtype=torch.long, device=self.device)
+        self._non_target_positions = torch.zeros((self.num_envs, self.max_non_targets, 3), device=self.device)
+        self._non_target_orientations = torch.zeros((self.num_envs, self.max_non_targets, 4), device=self.device)
+        self._distances = torch.zeros((self.num_envs, self.max_non_targets), device=self.device)
+        self._sorted_distances = torch.zeros((self.num_envs, self.max_non_targets), device=self.device)
+        self._sorted_indices = torch.zeros((self.num_envs, self.max_non_targets), dtype=torch.long, device=self.device)
+        self._nearest_indices = torch.zeros((self.num_envs, self.k_nearest), dtype=torch.long, device=self.device)
+        self._batch_indices = torch.arange(self.num_envs, device=self.device).unsqueeze(1).expand(-1, self.k_nearest)
+        self._valid_mask = torch.zeros((self.num_envs, self.max_non_targets), dtype=torch.bool, device=self.device)
+        self._valid_nearest = torch.zeros((self.num_envs, self.k_nearest), dtype=torch.bool, device=self.device)
+        self._invalid_mask_pos = torch.zeros((self.num_envs, self.k_nearest, 3), dtype=torch.bool, device=self.device)
+        self._invalid_mask_ori = torch.zeros((self.num_envs, self.k_nearest, 4), dtype=torch.bool, device=self.device)
+        self._inf_tensor = torch.full((self.num_envs, self.max_non_targets), torch.inf, device=self.device)
 
-        if self.render_target:
-            self.target_shadow_hand_rigid_body_states = rigid_body_states[
-                :, self.target_shadow_hand_rigid_body_start : self.target_shadow_hand_rigid_body_end, :
-            ]
-            self.target_shadow_hand_rigid_body_positions = self.target_shadow_hand_rigid_body_states[..., 0:3]
-            self.target_shadow_hand_rigid_body_orientations = self.target_shadow_hand_rigid_body_states[..., 3:7]
-
-            self.target_shadow_hand_center_states = self.target_shadow_hand_rigid_body_states[
-                :, self.target_shadow_center_index, :
-            ]
-            self.target_shadow_hand_center_positions = self.target_shadow_hand_center_states[:, 0:3]
-            self.target_shadow_hand_center_orientations = self.target_shadow_hand_center_states[:, 3:7]
 
         net_contact_forces = self.net_contact_forces.view(self.num_envs, self.num_rigid_bodies, 3)
 
-        self.shadow_hand_net_contact_forces = net_contact_forces[
-            :, self.shadow_hand_rigid_body_start : self.shadow_hand_rigid_body_end, :
+        self.allegro_hand_net_contact_forces = net_contact_forces[
+            :, self.allegro_hand_rigid_body_start : self.allegro_hand_rigid_body_end, :
         ]
 
         # allocate buffers to hold intermediate results
@@ -697,10 +721,10 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         kwargs = {"dtype": torch.float, "device": self.device}
         self._r_target_object_root_positions = torch.zeros((self.num_envs, 3), **kwargs)
         self._r_target_object_root_orientations = torch.zeros((self.num_envs, 4), **kwargs)
-        self._r_target_shadow_dof_positions = torch.zeros((self.num_envs, 24), **kwargs)
-        self._r_target_shadow_digits_actuated_dof_positions = torch.zeros((self.num_envs, 18), **kwargs)
-        self._r_target_shadow_fingers_actuated_dof_positions = torch.zeros((self.num_envs, 13), **kwargs)
-        self._r_target_shadow_thumb_actuated_dof_positions = torch.zeros((self.num_envs, 5), **kwargs)
+        self._r_target_allegro_dof_positions = torch.zeros((self.num_envs, 22), **kwargs)  # 6 arm + 16 hand
+        self._r_target_allegro_digits_actuated_dof_positions = torch.zeros((self.num_envs, 16), **kwargs)  # 16 Allegro hand DOF
+        self._r_target_allegro_fingers_actuated_dof_positions = torch.zeros((self.num_envs, 12), **kwargs)  # 3 fingers × 4 DOF
+        self._r_target_allegro_thumb_actuated_dof_positions = torch.zeros((self.num_envs, 4), **kwargs)  # 4 thumb DOF
         self._r_target_object_positions_wrt_palm = torch.zeros((self.num_envs, 3), **kwargs)
         self._r_target_object_orientations_wrt_palm = torch.zeros((self.num_envs, 4), **kwargs)
         self._r_target_palm_positions_wrt_object = torch.zeros((self.num_envs, 3), **kwargs)
@@ -710,16 +734,9 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         self.curr_targets_buffer = torch.zeros((self.num_envs, self.num_dofs), **kwargs)
 
         # create slices from above buffer
-        self.prev_targets = self.prev_targets_buffer[:, self.shadow_hand_dof_start : self.shadow_hand_dof_end]
-        self.curr_targets = self.curr_targets_buffer[:, self.shadow_hand_dof_start : self.shadow_hand_dof_end]
+        self.prev_targets = self.prev_targets_buffer[:, self.allegro_hand_dof_start : self.allegro_hand_dof_end]
+        self.curr_targets = self.curr_targets_buffer[:, self.allegro_hand_dof_start : self.allegro_hand_dof_end]
 
-        if self.render_target:
-            self.prev_target_targets = self.prev_targets_buffer[
-                :, self.target_shadow_hand_dof_start : self.target_shadow_hand_dof_end
-            ]
-            self.curr_target_targets = self.curr_targets_buffer[
-                :, self.target_shadow_hand_dof_start : self.target_shadow_hand_dof_end
-            ]
 
         self.rb_forces = torch.zeros((self.num_envs, self.num_rigid_bodies, 3), **kwargs)
         self.occupied_object_init_root_positions = torch.zeros((self.num_envs, 3), **kwargs)
@@ -729,9 +746,8 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         self._table_pose_tensor = torch.tensor(self._table_pose, **kwargs)
         self._target_hand_palm_pose = torch.tensor(self._target_hand_palm_pose, **kwargs)
         self._current_hand_palm_pose = torch.tensor(self._current_hand_palm_pose, **kwargs)
-        self._ur10e_right_init_position = torch.tensor(self._ur10e_right_init_position, **kwargs)
-        self._ur10e_right_init_orientation = torch.tensor(self._ur10e_right_init_orientation, **kwargs)
-        self._ur10e_right_init_j_eef = torch.tensor(self._ur10e_right_init_j_eef, **kwargs)
+        self._xarm_right_init_position = torch.tensor(self._xarm_right_init_position, **kwargs)
+        self._xarm_right_init_orientation = torch.tensor(self._xarm_right_init_orientation, **kwargs)
         self._palm2forearm_quat = torch.tensor(self._palm2forearm_quat, **kwargs)
         self._palm2forearm_pos = torch.tensor(self._palm2forearm_pos, **kwargs)
         self._object_nominal_orientation = torch.tensor(self._object_nominal_orientation, **kwargs)
@@ -741,7 +757,7 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
             self.pointclouds_wrt_palm = torch.zeros((self.num_envs, self.num_object_points, 3), **kwargs)
 
         self.__init_meta_data()
-        self.preprocess_shadow_pointcloud()
+        self.preprocess_allegro_pointcloud()
 
         self.successes = torch.zeros(self.num_envs, **kwargs)
         self.done_successes = torch.zeros(self.num_envs, **kwargs)
@@ -750,10 +766,7 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         self.unused_object_init_root_positions = torch.stack(
             [position(pose, self.device) for pose in self.gym_assets["current"]["objects"]["poses"]], dim=0
         )
-        if self.render_target:
-            self.target_unused_object_init_root_positions = torch.stack(
-                [position(pose, self.device) for pose in self.gym_assets["target"]["objects"]["poses"]], dim=0
-            )
+
         self.obj_max_length = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         if "gf" in self.observation_info:
             self.gf = torch.zeros((self.num_envs, self.observation_info["gf"]), **kwargs)
@@ -789,7 +802,14 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
             self.prev_kpoint_distances = torch.zeros((self.num_envs, 6), **kwargs)
             self.occupied_mesh_indices = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
+        # Initialize singulation reward variables
+        self.tilt_reward_scaled = torch.zeros(self.num_envs, device=self.device)
+        self.slide_reward_scaled = torch.zeros(self.num_envs, device=self.device)
+        self.neighbor_stability_penalty_scaled = torch.zeros(self.num_envs, device=self.device)
+        self.stability_penalty_scaled = torch.zeros(self.num_envs, device=self.device)
+        
         # init state has collide with table, so we need to first reset to get robot to a valid pose, then continue simulation
+        self.actions = torch.zeros((self.num_envs, self.num_actions), device=self.device)
         self.reset_arm(first_time=True)
 
     def reset_arm(self, first_time=False):
@@ -848,48 +868,98 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
     # Imagined Pointcloud #
     #######################
 
-    def preprocess_shadow_pointcloud(self):
-        """Preprocess shadow-hand pointcloud.
+    def preprocess_allegro_pointcloud(self):
+        """Preprocess allegro-hand pointcloud.
 
-        Load original shadow-hand pointcloud, apply farthest point sampling, store the result in `self._cached_pointclouds`.
+        Load original allegro-hand pointcloud, apply farthest point sampling, store the result in `self._cached_pointclouds`.
+
+            0.0-3.0 index finger
+            4.0-7.0 middle finger  
+            8.0-11.0 ring finger
+            12.0-15.0 thumb
         """
+        
 
-        original_mesh_dir = os.path.join(self._asset_root, "shadow_robot", "sr_description", "meshes", "components")
+        original_mesh_dir = os.path.join(self._asset_root, "hands", "allegro_hand", "meshes", "visual")
         original_mesh_filepaths: OrderedDict = OrderedDict(
             [
-                ("ffproximal", "f_proximal/f_proximal_E3M5.dae"),
-                ("ffmiddle", "f_middle/f_middle_E3M5.dae"),
-                ("ffdistal", "f_distal/pst/f_distal_pst.dae"),
-                ("lfproximal", "f_proximal/f_proximal_E3M5.dae"),
-                ("lfmiddle", "f_middle/f_middle_E3M5.dae"),
-                ("lfdistal", "f_distal/pst/f_distal_pst.dae"),
-                ("mfproximal", "f_proximal/f_proximal_E3M5.dae"),
-                ("mfmiddle", "f_middle/f_middle_E3M5.dae"),
-                ("mfdistal", "f_distal/pst/f_distal_pst.dae"),
-                ("rfproximal", "f_proximal/f_proximal_E3M5.dae"),
-                ("rfmiddle", "f_middle/f_middle_E3M5.dae"),
-                ("rfdistal", "f_distal/pst/f_distal_pst.dae"),
-                ("thproximal", "th_proximal/th_proximal_E3M5.dae"),
-                ("thmiddle", "th_middle/th_middle_E3M5.dae"),
-                ("thdistal", "th_distal/pst/th_distal_pst.dae"),
+                # Index finger (0.0-3.0)
+                ("ffproximal", "link_0.0.glb"),
+                ("ffmiddle", "link_1.0.glb"),
+                ("ffdistal", "link_2.0.glb"), 
+                ("fftip", "link_tip.glb"),
+                # Middle finger (4.0-7.0)
+                ("mfproximal", "link_1.0.glb"),
+                ("mfmiddle", "link_2.0.glb"),
+                ("mfdistal", "link_3.0.glb"),
+                ("mftip", "link_tip.glb"),
+                # Ring finger (8.0-11.0)
+                ("rfproximal", "link_1.0.glb"),
+                ("rfmiddle", "link_2.0.glb"),
+                ("rfdistal", "link_3.0.glb"),
+                ("rftip", "link_tip.glb"),
+                # Thumb (12.0-15.0)
+                ("thproximal", "link_12.0_right.glb"),
+                ("thmiddle", "link_13.0.glb"),
+                ("thdistal", "link_14.0.glb"),
+                ("thtip", "link_tip.glb"),
             ]
         )
 
         # load original mesh
         components = OrderedDict()
         for name, filepath in original_mesh_filepaths.items():
-            name = "rh_" + name
-            components[name] = {}
-            components[name]["mesh"] = trimesh.load(
+            # Map to actual link names used in Allegro hand
+            if name.startswith("ff"):  # Index finger (finger 0)
+                if "proximal" in name:
+                    link_name = "link_0.0"
+                elif "middle" in name:
+                    link_name = "link_1.0"
+                elif "distal" in name:
+                    link_name = "link_2.0"
+                else:  # tip
+                    link_name = "link_3.0_tip"
+            elif name.startswith("mf"):  # Middle finger (finger 1)
+                if "proximal" in name:
+                    link_name = "link_4.0"
+                elif "middle" in name:
+                    link_name = "link_5.0"
+                elif "distal" in name:
+                    link_name = "link_6.0"
+                else:  # tip
+                    link_name = "link_7.0_tip"
+            elif name.startswith("rf"):  # Ring finger (finger 2)
+                if "proximal" in name:
+                    link_name = "link_8.0"
+                elif "middle" in name:
+                    link_name = "link_9.0"
+                elif "distal" in name:
+                    link_name = "link_10.0"
+                else:  # tip
+                    link_name = "link_11.0_tip"
+            elif name.startswith("th"):  # Thumb
+                if "proximal" in name:
+                    link_name = "link_12.0"
+                elif "middle" in name:
+                    link_name = "link_13.0"
+                elif "distal" in name:
+                    link_name = "link_14.0"
+                else:  # tip
+                    link_name = "link_15.0_tip"
+            else:
+                link_name = name
+            
+            components[link_name] = {}
+            components[link_name]["mesh"] = trimesh.load(
                 os.path.join(original_mesh_dir, filepath), process=False, force="mesh"
             )
 
-            area = components[name]["mesh"].area
+            area = components[link_name]["mesh"].area
             if "proximal" in name:
                 area *= 0.3
             elif "middle" in name:
                 area *= 0.6
-            components[name]["area"] = area
+            components[link_name]["area"] = area
 
         # compute number of samples for each component
         area = sum([item["area"] for item in components.values()])
@@ -913,23 +983,29 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
 
         # find rigid body index for each component
         current_robot_asset = self.gym_assets["current"]["robot"]["asset"]
-        target_robot_asset = self.gym_assets["target"]["robot"]["asset"]
-        for name in components:
-            components[name]["current_index"] = self.gym.find_asset_rigid_body_index(current_robot_asset, name)
-            components[name]["target_index"] = self.gym.find_asset_rigid_body_index(target_robot_asset, name)
+        # target_robot_asset = self.gym_assets["target"]["robot"]["asset"]
+    
+        if self.enable_contact_sensors:
+            for name in components:
+                components[name]["current_index"] = self.gym.find_asset_rigid_body_index(current_robot_asset, name)
+                # components[name]["target_index"] = self.gym.find_asset_rigid_body_index(target_robot_asset, name)
 
-            sensor_name = name.replace("rh_", "sensor_")
-            components[name]["sensor_index"] = (
-                self.force_sensor_names.index(sensor_name) if sensor_name in self.force_sensor_names else -1
-            )
-            print(sensor_name, components[name]["sensor_index"])
+                # For Allegro hand, map to force sensor names at fingertips
+                if name in ["link_3.0_tip", "link_7.0_tip", "link_11.0_tip", "link_15.0_tip"]:
+                    sensor_name = f"sensor_{name}"
+                    components[name]["sensor_index"] = (
+                        self.force_sensor_names.index(sensor_name) if sensor_name in self.force_sensor_names else -1
+                    )
+                else:
+                    components[name]["sensor_index"] = -1  # No sensor for non-tip links
+                print(f"Link: {name}, Sensor: {components[name]['sensor_index']}")
 
         self._cached_pointclouds = pointclouds
         self.imagined_pointcloud_components = components
         # print(self.imagined_pointcloud_components)
 
     def extract_contact_region(self, pointcloud: torch.Tensor) -> torch.Tensor:
-        """Split the shadow-hand pointcloud to `front` and `back` side."""
+        """Split the allegro-hand pointcloud to `front` and `back` side."""
         x, y, z = pointcloud[:, 0], pointcloud[:, 1], pointcloud[:, 2]
         return (x.abs() < 0.9 * x.abs().max()) & (z.abs() < 0.9 * z.abs().max()) & (y < 0)
 
@@ -954,11 +1030,11 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         assert stage in ["current", "target"], "stage must be either `current` or `target`"
 
         if stage == "current":
-            rigid_body_positions = self.shadow_hand_rigid_body_positions
-            rigid_body_orientations = self.shadow_hand_rigid_body_orientations
+            rigid_body_positions = self.allegro_hand_rigid_body_positions
+            rigid_body_orientations = self.allegro_hand_rigid_body_orientations
         else:
-            rigid_body_positions = self.target_shadow_hand_rigid_body_positions
-            rigid_body_orientations = self.target_shadow_hand_rigid_body_orientations
+            rigid_body_positions = self.target_allegro_hand_rigid_body_positions
+            rigid_body_orientations = self.target_allegro_hand_rigid_body_orientations
 
         imagined_pointclouds = torch.zeros((self.num_envs, self.num_imagined_points, 3), device=self.device)
         cursor = 0
@@ -1059,26 +1135,88 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         self.gym.refresh_force_sensor_tensor(self.sim)
         self.gym.refresh_jacobian_tensors(self.sim)
 
-        self.fingertip_states = self.shadow_hand_rigid_body_states[:, self.fingertip_indices, :]
+        net_contact_forces = self.net_contact_forces.view(self.num_envs, self.num_rigid_bodies, 3)
+        self.arm_contact_forces = net_contact_forces[:, self.arm_link_indices, :]
+        self.hand_contact_forces = net_contact_forces[:, self.hand_link_indices, :]
+
+        self.fingertip_states = self.allegro_hand_rigid_body_states[:, self.fingertip_indices, :]
         self.fingertip_positions = self.fingertip_states[..., 0:3]
         self.fingertip_orientations = self.fingertip_states[..., 3:7]
         self.fingertip_linear_velocities = self.fingertip_states[..., 7:10]
         self.fingertip_angular_velocities = self.fingertip_states[..., 10:13]
 
-        self.keypoint_positions = self.shadow_hand_rigid_body_positions[:, self.keypoint_indices, :]
+        self.keypoint_positions = self.allegro_hand_rigid_body_positions[:, self.keypoint_indices, :]
 
-        if self.render_target:
-            self.target_fingertip_states = self.target_shadow_hand_rigid_body_states[
-                :, self.target_fingertip_indices, :
-            ]
-            self.target_fingertip_positions = self.target_fingertip_states[..., 0:3]
-            self.target_fingertip_orientations = self.target_fingertip_states[..., 3:7]
 
         self.object_root_states = self.root_states[self.occupied_object_indices]
         self.object_root_positions = self.object_root_states[..., 0:3]
         self.object_root_orientations = self.object_root_states[..., 3:7]
         self.object_root_linear_velocities = self.object_root_states[..., 7:10]
         self.object_root_angular_velocities = self.object_root_states[..., 10:13]
+        
+        
+        # Compute nearest non-target objects for each environment
+        self.nearest_non_target_object_positions.zero_()
+        self.nearest_non_target_object_orientations.zero_()
+        
+        if self.non_occupied_object_indices.numel() > 0:
+            # Get target object positions for all environments (use pre-allocated tensor)
+            # occupied_object_relative_indices shape: (num_envs,)
+            # scene_object_root_positions shape: (num_envs, num_objects_per_env, 3)
+            torch.gather(
+                self.scene_object_root_positions, 
+                1, 
+                self.occupied_object_relative_indices.unsqueeze(1).unsqueeze(2).expand(-1, 1, 3),
+                out=self._target_positions.unsqueeze(1)
+            )
+            self._target_positions.squeeze_(1)  # Shape: (num_envs, 3)
+            
+            # Create expanded indices for gathering (use pre-allocated tensors)
+            self._gather_indices_pos[:] = self.non_occupied_object_indices.unsqueeze(-1).expand(-1, -1, 3)
+            self._gather_indices_ori[:] = self.non_occupied_object_indices.unsqueeze(-1).expand(-1, -1, 4)
+            
+            # Gather non-target positions and orientations (use pre-allocated tensors)
+            torch.gather(self.scene_object_root_positions, 1, self._gather_indices_pos, out=self._non_target_positions)
+            torch.gather(self.scene_object_root_orientations, 1, self._gather_indices_ori, out=self._non_target_orientations)
+            
+            # Compute distances from target to all non-target objects (use pre-allocated tensor)
+            # target_positions: (num_envs, 3) -> (num_envs, 1, 3)
+            # non_target_positions: (num_envs, max_non_targets, 3)
+            torch.norm(
+                self._non_target_positions - self._target_positions.unsqueeze(1), 
+                dim=2,
+                out=self._distances
+            )  # Shape: (num_envs, max_non_targets)
+            
+            # Set distance to infinity for padded/invalid objects (use pre-allocated mask)
+            torch.logical_and(
+                self.non_occupied_object_indices >= 0, 
+                self.non_occupied_object_indices < self.num_objects_per_env,
+                out=self._valid_mask
+            )
+            torch.where(self._valid_mask, self._distances, self._inf_tensor, out=self._distances)
+            
+            # Sort distances and get indices of nearest objects (use pre-allocated tensors)
+            torch.sort(self._distances, dim=1, out=(self._sorted_distances, self._sorted_indices))
+            
+            # Take only the k nearest (use pre-allocated tensor)
+            self._nearest_indices[:] = self._sorted_indices[:, :self.k_nearest]
+            
+            # Gather the nearest positions and orientations (use pre-allocated batch_indices)
+            self.nearest_non_target_object_positions[:, :self.k_nearest] = self._non_target_positions[self._batch_indices, self._nearest_indices]
+            self.nearest_non_target_object_orientations[:, :self.k_nearest] = self._non_target_orientations[self._batch_indices, self._nearest_indices]
+            
+            # Handle case where some environments have invalid nearest objects (use pre-allocated tensors)
+            torch.lt(self._sorted_distances[:, :self.k_nearest], torch.inf, out=self._valid_nearest)
+            
+            # Create expanded invalid masks (use pre-allocated tensors)
+            torch.logical_not(self._valid_nearest.unsqueeze(-1).expand(-1, -1, 3), out=self._invalid_mask_pos)
+            torch.logical_not(self._valid_nearest.unsqueeze(-1).expand(-1, -1, 4), out=self._invalid_mask_ori)
+            
+            # Apply masks to zero out invalid entries
+            self.nearest_non_target_object_positions[:, :self.k_nearest, :][self._invalid_mask_pos] = 0.0
+            self.nearest_non_target_object_orientations[:, :self.k_nearest, :][self._invalid_mask_ori] = 0.0
+
 
         self.object_bboxes_wrt_world[:, :3] = transformation_apply(
             self.object_root_orientations, self.object_root_positions, self.object_bboxes[:, :3]
@@ -1088,7 +1226,7 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         )
 
         world_to_palm_rotation, world_to_palm_translation = transformation_inverse(
-            self.shadow_hand_center_orientations, self.shadow_hand_center_positions
+            self.allegro_hand_center_orientations, self.allegro_hand_center_positions
         )
 
         self.object_bboxes_wrt_palm[:, :3] = transformation_apply(
@@ -1099,8 +1237,8 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         )
 
         self.palm_orientations_wrt_object, self.palm_positions_wrt_object = compute_relative_pose(
-            self.shadow_hand_center_orientations,
-            self.shadow_hand_center_positions,
+            self.allegro_hand_center_orientations,
+            self.allegro_hand_center_positions,
             self.object_root_orientations,
             self.object_root_positions,
         )
@@ -1108,8 +1246,8 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         self.fingertip_orientations_wrt_palm, self.fingertip_positions_wrt_palm = compute_relative_pose(
             self.fingertip_orientations,
             self.fingertip_positions,
-            self.shadow_hand_center_orientations[:, None, :],
-            self.shadow_hand_center_positions[:, None, :],
+            self.allegro_hand_center_orientations[:, None, :],
+            self.allegro_hand_center_positions[:, None, :],
         )
 
         if add_noise:
@@ -1128,33 +1266,33 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
             self.observed_object_orientations_wrt_palm, self.observed_object_positions_wrt_palm = compute_relative_pose(
                 self.observed_object_orientations,
                 self.observed_object_positions,
-                self.shadow_hand_center_orientations,
-                self.shadow_hand_center_positions,
+                self.allegro_hand_center_orientations,
+                self.allegro_hand_center_positions,
             )
 
         self.object_orientations_wrt_palm, self.object_positions_wrt_palm = compute_relative_pose(
             self.object_root_orientations,
             self.object_root_positions,
-            self.shadow_hand_center_orientations,
-            self.shadow_hand_center_positions,
+            self.allegro_hand_center_orientations,
+            self.allegro_hand_center_positions,
         )
 
-        if self.render_target:
-            self.target_object_root_states = self.root_states[self.target_occupied_object_indices]
-            self.target_object_root_positions = self.target_object_root_states[..., 0:3]
-            self.target_object_root_orientations = self.target_object_root_states[..., 3:7]
+        self.object_positions_wrt_keypoints = self.keypoint_positions - self.object_root_positions[:, None, :]
+        
 
+        
+        
         self.position_distances = self.object_positions_wrt_palm - self._r_target_object_positions_wrt_palm
         self.orientation_distances = quat_mul(
             self.object_orientations_wrt_palm, quat_conjugate(self._r_target_object_orientations_wrt_palm)
         )
         self.dof_distances = (
-            self.shadow_hand_dof_positions[:, self.shadow_digits_actuated_dof_indices]
-            - self._r_target_shadow_digits_actuated_dof_positions
+            self.allegro_hand_dof_positions[:, self.allegro_digits_actuated_dof_indices]
+            - self._r_target_allegro_digits_actuated_dof_positions
         )
 
         if self.enable_contact_sensors:
-            contact_forces = self.shadow_hand_net_contact_forces[:, self.force_sensor_rigid_body_indices, :]
+            contact_forces = self.allegro_hand_net_contact_forces[:, self.force_sensor_rigid_body_indices, :]
             contact_forces = torch.norm(contact_forces, dim=-1)
             # binary contact sensor
             self.contact_forces = torch.where(contact_forces >= self.contact_sensor_threshold, 1.0, 0.0)
@@ -1173,34 +1311,21 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
             self.object_pointclouds = self.obj_pointclouds_wrt_world
             self.pointclouds_wrt_palm = compute_relative_position(
                 self.obj_pointclouds_wrt_world,
-                self.shadow_hand_center_orientations[:, None, :],
-                self.shadow_hand_center_positions[:, None, :],
+                self.allegro_hand_center_orientations[:, None, :],
+                self.allegro_hand_center_positions[:, None, :],
             )
             self.object_pointclouds_wrt_palm = self.pointclouds_wrt_palm
 
-            if self.render_target:
-                self.target_object_pointclouds = self.compute_object_pointclouds("target")
-                self.target_pointclouds_wrt_palm = compute_relative_position(
-                    self.target_object_pointclouds,
-                    self.target_shadow_hand_center_orientations[:, None, :],
-                    self.target_shadow_hand_center_positions[:, None, :],
-                )
 
         if self.enable_imagined_pointcloud_observation:
             self.imagined_pointclouds = self.compute_imagined_pointclouds("current")
             self.imagined_pointclouds_wrt_palm = compute_relative_position(
                 self.imagined_pointclouds,
-                self.shadow_hand_center_orientations[:, None, :],
-                self.shadow_hand_center_positions[:, None, :],
+                self.allegro_hand_center_orientations[:, None, :],
+                self.allegro_hand_center_positions[:, None, :],
             )
 
-            if self.render_target:
-                self.target_imagined_pointclouds = self.compute_imagined_pointclouds("target")
-                self.target_imagined_pointclouds_wrt_palm = compute_relative_position(
-                    self.target_imagined_pointclouds,
-                    self.target_shadow_hand_center_orientations[:, None, :],
-                    self.target_shadow_hand_center_positions[:, None, :],
-                )
+
 
         if self.enable_rendered_pointcloud_observation:
             self.gym.fetch_results(self.sim, True)
@@ -1284,9 +1409,9 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
             )
             mftip_index = self.gym.find_asset_rigid_body_index(self.gym_assets["current"]["robot"]["asset"], "rh_mftip")
 
-            thtip_positions = self.shadow_hand_rigid_body_positions[:, thtip_index]
-            mfmid_positions = self.shadow_hand_rigid_body_positions[:, mfmid_index]
-            mftip_positions = self.shadow_hand_rigid_body_positions[:, mftip_index]
+            thtip_positions = self.allegro_hand_rigid_body_positions[:, thtip_index]
+            mfmid_positions = self.allegro_hand_rigid_body_positions[:, mfmid_index]
+            mftip_positions = self.allegro_hand_rigid_body_positions[:, mftip_index]
 
             alpha = (torch.arange(1, 4, device=self.device) / 4.0).reshape(1, 3, 1)
             tiptip_points = alpha * thtip_positions[:, None, :] + (1 - alpha) * mftip_positions[:, None, :]
@@ -1316,7 +1441,7 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
 
             norm_object_orientation = torch.tensor([0.0, 0.0, 1.0, 0.0], device=self.device).repeat(self.num_envs, 1)
             self.norm_object_orientation_wrt_palm = quat_mul(
-                quat_conjugate(self.shadow_hand_center_orientations), norm_object_orientation
+                quat_conjugate(self.allegro_hand_center_orientations), norm_object_orientation
             )
 
     def __configure_specifications(self, specs: Dict, mdp_type: str) -> None:
@@ -1558,6 +1683,10 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         asset = self.gym.create_box(
             self.sim, self._table_x_length, self._table_y_length, self._table_thickness, asset_options
         )
+        
+        
+        rigid_shape_props = self.gym.get_asset_rigid_shape_properties(asset)
+        self.gym.set_asset_rigid_shape_properties(asset, rigid_shape_props)
 
         num_rigid_bodies = self.gym.get_asset_rigid_body_count(asset)
         num_rigid_shapes = self.gym.get_asset_rigid_shape_count(asset)
@@ -1573,20 +1702,20 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
             "num_rigid_shapes": num_rigid_shapes,
         }
 
-    def __define_contact_sensors(self, shadow_hand_asset: gymapi.Asset) -> None:
+    def __define_contact_sensors(self, allegro_hand_asset: gymapi.Asset) -> None:
         """Configure the contact sensors.
 
-        All the contact sensors are attached to the Shadow Hand. The corresponding link names should start with `sensor_`.
+        All the contact sensors are attached to the allegro Hand. The corresponding link names should start with `sensor_`.
 
         Args:
-            shadow_hand_asset (gymapi.Asset): The Shadow Hand asset to configure.
+            allegro_hand_asset (gymapi.Asset): The allegro Hand asset to configure.
         """
         indices = []
         fingertip_indices = []
         parent_indices = []
 
         print("Contact sensors:")
-        for name, index in self.gym.get_asset_rigid_body_dict(shadow_hand_asset).items():
+        for name, index in self.gym.get_asset_rigid_body_dict(allegro_hand_asset).items():
             if name.startswith("sensor_"):
                 indices.append(index)
                 if "distal" in name:
@@ -1594,16 +1723,16 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
                 print(f"- {name} ({index})")
         fingertip_contact_mask = [(i in fingertip_indices) for i in indices]
 
-        assert len(indices) > 0, "No contact sensors found in the Shadow Hand asset."
+        assert len(indices) > 0, "No contact sensors found in the allegro Hand asset."
         self.force_sensor_rigid_body_indices = torch.tensor(indices).long().sort().values.to(self.device)
 
         self.force_sensor_names = []
         for i in self.force_sensor_rigid_body_indices:
-            name = self.gym.get_asset_rigid_body_name(shadow_hand_asset, i)
+            name = self.gym.get_asset_rigid_body_name(allegro_hand_asset, i)
             self.force_sensor_names.append(name)
 
             parent_name = name.replace("sensor", "rh")
-            parent_indices.append(self.gym.find_asset_rigid_body_index(shadow_hand_asset, parent_name))
+            parent_indices.append(self.gym.find_asset_rigid_body_index(allegro_hand_asset, parent_name))
 
         self.force_sensor_parent_rigid_body_indices = torch.tensor(parent_indices).long().to(self.device)
         self.fingertip_contact_mask = torch.tensor(fingertip_contact_mask).bool().to(self.device)
@@ -1611,43 +1740,46 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         # find same element in two lists
         self.ft_idx_in_all = [i for (i, index) in enumerate(indices) if index in fingertip_indices]
 
-    def __configure_robot_dof_indices(self, shadow_hand_asset: gymapi.Asset) -> None:
-        """Configure the Shadow Hand DOFs.
+    @property
+    def contact_states(self) -> torch.Tensor:
+        """Compute contact states (tactile information) from force sensor data.
+        
+        For singulation task, we extract force magnitudes from fingertip force sensors.
+        Returns a tensor of shape [num_envs, num_tactile_sensors] where num_tactile_sensors
+        could be 4 (force magnitudes only) or 14 (extended tactile info).
+        """
+        if self.force_sensor_states is None or self.num_force_sensors == 0:
+            # If no force sensors, return zeros
+            return torch.zeros((self.num_envs, 14), device=self.device, dtype=torch.float)
+        
+        raise NotImplementedError("Contact states are not implemented")
+
+    def __configure_robot_dof_indices(self, allegro_hand_asset: gymapi.Asset) -> None:
+        """Configure the xArm6 + Allegro Hand DOFs.
 
         Args:
-            shadow_hand_asset (gymapi.Asset): The Shadow Hand asset to configure.
+            allegro_hand_asset (gymapi.Asset): The xArm6 + Allegro Hand asset to configure.
         """
-        dof_dict = self.gym.get_asset_dof_dict(shadow_hand_asset)
+        dof_dict = self.gym.get_asset_dof_dict(allegro_hand_asset)
 
         actuated_dof_indices = []
-        ur_actuated_dof_indices = []
-        shadow_actuated_dof_indices = []
-        shadow_digits_actuated_dof_indices = []
-        shadow_fingers_actuated_dof_indices = []
-        shadow_thumb_actuated_dof_indices = []
-        shadow_tendon_dof_indices = []
-        shadow_coupled_dof_indices = []
+        xarm_actuated_dof_indices = []
+        allegro_actuated_dof_indices = []
+        allegro_digits_actuated_dof_indices = []
+        allegro_fingers_actuated_dof_indices = []
+        allegro_thumb_actuated_dof_indices = []
 
         for name, index in dof_dict.items():
-            if fix_wrist and "rh_WRJ" in name:
-                continue
-
-            if any([dof in name for dof in self._tendon_dof_names]):
-                shadow_tendon_dof_indices.append(index)
-                continue
-            if any([dof in name for dof in self._coupled_dof_names]):
-                shadow_coupled_dof_indices.append(index)
-
-            if any([dof in name for dof in self._ur_dof_names]):
-                ur_actuated_dof_indices.append(index)
-            else:
-                shadow_actuated_dof_indices.append(index)
-                if any([dof in name for dof in self._digits_actuated_dof_names]):
-                    shadow_digits_actuated_dof_indices.append(index)
-                if any([dof in name for dof in self._fingers_actuated_dof_names]):
-                    shadow_fingers_actuated_dof_indices.append(index)
-                if any([dof in name for dof in self._thumb_actuated_dof_names]):
-                    shadow_thumb_actuated_dof_indices.append(index)
+            if any([dof in name for dof in self._xarm_dof_names]):
+                xarm_actuated_dof_indices.append(index)
+            elif any([dof in name for dof in self._allegro_hand_dof_names]):
+                allegro_actuated_dof_indices.append(index)
+                allegro_digits_actuated_dof_indices.append(index)
+                
+                if any([dof in name for dof in self._allegro_fingers_dof_names]):
+                    allegro_fingers_actuated_dof_indices.append(index)
+                elif any([dof in name for dof in self._allegro_thumb_dof_names]):
+                    allegro_thumb_actuated_dof_indices.append(index)
 
             actuated_dof_indices.append(index)
 
@@ -1655,27 +1787,23 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
             return torch.tensor(sorted(indices)).long().to(self.device)
 
         self.actuated_dof_indices = _torchify(actuated_dof_indices)
-        self.ur_actuated_dof_indices = _torchify(ur_actuated_dof_indices)
-        self.shadow_actuated_dof_indices = _torchify(shadow_actuated_dof_indices)
-        self.shadow_digits_actuated_dof_indices = _torchify(shadow_digits_actuated_dof_indices)
-        self.shadow_fingers_actuated_dof_indices = _torchify(shadow_fingers_actuated_dof_indices)
-        self.shadow_thumb_actuated_dof_indices = _torchify(shadow_thumb_actuated_dof_indices)
-        self.shadow_tendon_dof_indices = _torchify(shadow_tendon_dof_indices)
-        self.shadow_coupled_dof_indices = _torchify(shadow_coupled_dof_indices)
+        self.xarm_actuated_dof_indices = _torchify(xarm_actuated_dof_indices)
+        self.allegro_actuated_dof_indices = _torchify(allegro_actuated_dof_indices)
+        self.allegro_digits_actuated_dof_indices = _torchify(allegro_digits_actuated_dof_indices)
+        self.allegro_fingers_actuated_dof_indices = _torchify(allegro_fingers_actuated_dof_indices)
+        self.allegro_thumb_actuated_dof_indices = _torchify(allegro_thumb_actuated_dof_indices)
 
-        assert (self.shadow_tendon_dof_indices == self.shadow_coupled_dof_indices + 1).all()
-
-    def __define_shadow_hand_with_arm(self, asset_name: str = "Shadow Hand + UR10e") -> Dict[str, Any]:
-        """Define & load the Shadow Hand + UR10e asset.
+    def __define_allegro_hand_with_arm(self, asset_name: str = "allegro Hand + xarm") -> Dict[str, Any]:
+        """Define & load the allegro Hand + xarm asset.
 
         Args:
-            asset_name (str, optional): Asset name for logging. Defaults to "Shadow Hand + UR10e".
+            asset_name (str, optional): Asset name for logging. Defaults to "allegro Hand + xarm".
 
         Returns:
             Dict[str, Any]: The configuration of the robot.
         """
-        print(">>> Loading Shadow Hand + UR10e for current scene")
-        config = {"name": "shadow_hand"}
+        print(">>> Loading allegro Hand + xarm for current scene")
+        config = {"name": "allegro_hand"}
 
         asset_options = gymapi.AssetOptions()
         asset_options.flip_visual_attachments = False
@@ -1694,11 +1822,11 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
 
         if self.enable_contact_sensors:
             if self.contact_sensor_fingertip_only:
-                asset_filename = self._ur10e_shadow_hand_right_asset_file.replace(".urdf", "_contact_fingertip.urdf")
+                asset_filename = self._xarm_allegro_hand_right_asset_file.replace(".urdf", "_contact_fingertip.urdf")
             else:
-                asset_filename = self._ur10e_shadow_hand_right_asset_file.replace(".urdf", "_contact.urdf")
+                asset_filename = self._xarm_allegro_hand_right_asset_file.replace(".urdf", "_contact.urdf")
         else:
-            asset_filename = self._ur10e_shadow_hand_right_asset_file
+            asset_filename = self._xarm_allegro_hand_right_asset_file
 
         asset = self.gym.load_asset(self.sim, self._asset_root, asset_filename, asset_options)
         if self.env_info_logging:
@@ -1750,7 +1878,7 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         dof_props = self.gym.get_asset_dof_properties(asset)
         hand_dof_idx = 0
 
-        # set rigid-shape properties for shadow-hand
+        # set rigid-shape properties for allegro-hand
         rigid_shape_props = self.gym.get_asset_rigid_shape_properties(asset)
         for shape in rigid_shape_props:
             shape.friction = 3.0
@@ -1759,7 +1887,7 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         for i in range(num_dofs):
             name = self.gym.get_asset_dof_name(asset, i)
             dof_props["driveMode"][i] = gymapi.DOF_MODE_POS
-            if name.startswith("rh_") or name.startswith("lh_"):
+            if name.endswith(".0"):
                 dof_props["stiffness"][i] = 30
                 dof_props["damping"][i] = 1
                 dof_props["velocity"][i] = 3.0
@@ -1779,8 +1907,11 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         dof_init_positions = [0.0 for _ in range(num_dofs)]
         dof_init_velocities = [0.0 for _ in range(num_dofs)]
 
-        # reset ur10e initial dof positions
-        for name, value in self._ur10e_right_init_dof_positions.items():
+        # reset xarm initial dof positions
+        print(self._xarm_right_init_dof_positions)
+        for name, value in self._xarm_right_init_dof_positions.items():
+            print(name, value)
+            print(self.gym.find_asset_dof_index(asset, name))
             dof_init_positions[self.gym.find_asset_dof_index(asset, name)] = value
 
         config["limits"] = {}
@@ -1797,11 +1928,10 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
 
         # fmt: off
         close_dof_names = [
-            "rh_FFJ2", "rh_FFJ1",
-            "rh_MFJ2", "rh_MFJ1",
-            "rh_RFJ2", "rh_RFJ1",
-            "rh_LFJ2", "rh_LFJ1",
-            "rh_THJ2", "rh_THJ1",
+            "joint_2.0", "joint_3.0",  # finger 0 (index)
+            "joint_6.0", "joint_7.0",  # finger 1 (middle)
+            "joint_10.0", "joint_11.0",  # finger 2 (ring)
+            "joint_14.0", "joint_15.0",  # thumb
         ]
         # fmt: on
 
@@ -1812,28 +1942,43 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         )
 
         pose = gymapi.Transform()
-        pose.p = gymapi.Vec3(-0.15, 1.05, 0.2)
-        pose.r = gymapi.Quat(0.0, 0.0, -np.sqrt(0.5), np.sqrt(0.5))
+        pose.p = gymapi.Vec3(*self._xarm_right_init_position)
+        pose.r = gymapi.Quat(*self._xarm_right_init_orientation)
 
-        self.shadow_center_index = self.gym.find_asset_rigid_body_index(asset, self._shadow_hand_center_prim)
-        self.shadow_mfknuckle_index = self.gym.find_asset_rigid_body_index(asset, self._shadow_hand_mfknuckle_prim)
-        self.fingertip_indices = [
-            self.gym.find_asset_rigid_body_index(asset, f"rh_{prim}") for prim in self._fingertips
-        ]
-        self.keypoint_indices = [self.gym.find_asset_rigid_body_index(asset, f"rh_{prim}") for prim in self._keypoints]
+        self.allegro_center_index = self.gym.find_asset_rigid_body_index(asset, self._allegro_hand_center_prim)
+        self.allegro_palm_index = self.gym.find_asset_rigid_body_index(asset, self._allegro_hand_palm_prim)
+        self.fingertip_indices = [self.gym.find_asset_rigid_body_index(asset, prim) for prim in self._fingertips]
+        self.keypoint_indices = [self.gym.find_asset_rigid_body_index(asset, prim) for prim in self._keypoints]
+        self.arm_link_indices = [self.gym.find_asset_rigid_body_index(asset, prim) for prim in self._arm_links]
+        self.hand_link_indices = [self.gym.find_asset_rigid_body_index(asset, prim) for prim in self._hand_links]
 
         config["asset"] = asset
         config["pose"] = pose
         config["dof_props"] = dof_props
 
-        print(">>> Shadow Hand + UR10e loaded")
+        print(">>> xArm6 + Allegro Hand loaded")
         return config
 
-    def __define_object(self, dataset: str = "oakink") -> Dict[str, Any]:
+    def __define_object(self, dataset: str = "boxes") -> Dict[str, Any]:
         """Define & load objects for the current scene.
+        
+        For singulation task, we create a grid of boxes instead of loading dataset objects.
 
         Args:
-            dataset (str, optional): Name of the dataset. Defaults to 'oakink'.
+            dataset (str, optional): Dataset type. Defaults to 'boxes'.
+
+        Returns:
+            Dict[str, Any]: The configuration of the objects.
+        """
+        return self.__create_box_grid()
+    
+    def __define_object_deprecated(self, dataset: str = "boxes") -> Dict[str, Any]:
+        """Define & load objects for the current scene.
+        
+        For singulation task, we create a grid of boxes instead of loading dataset objects.
+
+        Args:
+            dataset (str, optional): Dataset type. Defaults to 'boxes'.
 
         Returns:
             Dict[str, Any]: The configuration of the objects.
@@ -1868,18 +2013,12 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
 
         loaded = {}
         for i, name in enumerate(object_codes):
-            from loguru import logger
-            logger.info(f"Loading object: {name}")
             if name in loaded:
                 cfg = config["warehouse"][loaded[name]].copy()
             else:
                 loaded[name] = i
                 asset_filename = os.path.join(dataset, name, "decomposed.urdf")
-                if True:
-                    # create box actor
-                    asset = self.gym.create_box(self.sim, 0.02, 0.02, 0.02, asset_options)
-                else:
-                    asset = self.gym.load_asset(self.sim, self._asset_root, asset_filename, asset_options)
+                asset = self.gym.load_asset(self.sim, self._asset_root, asset_filename, asset_options)
 
                 # set rigid-shape properties
                 rigid_shape_props = self.gym.get_asset_rigid_shape_properties(asset)
@@ -1929,17 +2068,101 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         print(">>> Objects loaded")
         return config
 
-    def __define_target_shadow_hand(self, asset_name: str = "Target Shadow Hand") -> Dict[str, Any]:
-        """Define & load the target Shadow Hand.
+    def __create_box_grid(self) -> Dict[str, Any]:
+        """Create a grid of boxes for singulation task.
+        
+        Returns:
+            Dict[str, Any]: Configuration for the box grid
+        """
+        print(">>> Creating box grid for singulation task")
+        
+        config = {}
+        config["warehouse"] = []
+        
+        asset_options = gymapi.AssetOptions()
+        asset_options.density = 1500.0
+        asset_options.convex_decomposition_from_submeshes = True
+        asset_options.override_com = True
+        asset_options.override_inertia = True
+        
+        for i in range(self.num_objects_per_env):
+            box_asset = self.gym.create_box(self.sim, self._box_width, self._box_depth, self._box_height, asset_options)
+            
+            rigid_shape_props = self.gym.get_asset_rigid_shape_properties(box_asset)
+            for shape in rigid_shape_props:
+                shape.friction = 0.8
+                shape.restitution = 0.1
+            self.gym.set_asset_rigid_shape_properties(box_asset, rigid_shape_props)
+            
+            cfg = {
+                "name": f"box_{i}",
+                "asset": box_asset,
+                "num_rigid_bodies": self.gym.get_asset_rigid_body_count(box_asset),
+                "num_rigid_shapes": self.gym.get_asset_rigid_shape_count(box_asset),
+            }
+            config["warehouse"].append(cfg)
+        
+        config["count"] = len(config["warehouse"])
+        
+        # Calculate total rigid bodies and shapes needed for ALL boxes in the environment
+        # Each box has 1 rigid body and 1 rigid shape, and we have num_objects_per_env boxes
+        config["num_rigid_bodies"] = self.num_objects_per_env * 1  # 25 boxes × 1 body each = 25
+        config["num_rigid_shapes"] = self.num_objects_per_env * 1   # 25 boxes × 1 shape each = 25
+        
+        config["poses"] = self.__generate_box_poses()
+        
+        print(f">>> Box grid created with {len(config['warehouse'])} box assets")
+        return config
+
+    def __generate_box_poses(self) -> List[gymapi.Transform]:
+        """Generate poses for boxes in a grid pattern on the table.
+        
+        Returns:
+            List[gymapi.Transform]: List of poses for each box
+        """
+        poses = []
+        
+        # Calculate grid center position on table
+        table_center_x = self._table_pose[0]
+        table_center_y = self._table_pose[1] 
+        table_top_z = self._table_pose[2] + (self._table_thickness + self._box_height) / 2 + 0.01
+        
+        # Calculate grid dimensions
+        grid_width = self._grid_cols * self._box_width + (self._grid_cols - 1) * self._box_spacing
+        grid_height = self._grid_rows * self._box_depth + (self._grid_rows - 1) * self._box_spacing
+        
+        # Starting position (top-left corner of grid)
+        start_x = table_center_x - grid_width / 2 + self._box_width / 2
+        start_y = table_center_y - grid_height / 2 + self._box_depth / 2
+        
+        # Generate poses for each box in the grid
+        for i in range(self.num_objects_per_env):
+            row = i // self._grid_cols
+            col = i % self._grid_cols
+            
+            pose = gymapi.Transform()
+            pose.p = gymapi.Vec3(
+                start_x + col * (self._box_width + self._box_spacing),
+                start_y + row * (self._box_depth + self._box_spacing),
+                table_top_z
+            )
+            pose.r = gymapi.Quat(0, 0, 0, 1)  # No rotation
+            
+            poses.append(pose)
+        
+        return poses
+
+    def __define_target_allegro_hand(self, asset_name: str = "Target allegro Hand") -> Dict[str, Any]:
+        """Define & load the target allegro Hand.
 
         Args:
-            asset_name (str, optional): Asset name for logging. Defaults to "Target Shadow Hand".
+            asset_name (str, optional): Asset name for logging. Defaults to "Target allegro Hand".
 
         Returns:
-            Dict[str, Any]: The configuration of the target Shadow Hand.
+            Dict[str, Any]: The configuration of the target allegro Hand.
         """
-        print(">>> Loading Shadow Hand for target scene")
-        config = {"name": "target_shadow_hand"}
+        print(">>> Loading allegro Hand for target scene")
+        config = {"name": "target_allegro_hand"}
 
         asset_options = gymapi.AssetOptions()
         asset_options.fix_base_link = True
@@ -1952,7 +2175,7 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         if self.env_info_logging:
             print_asset_options(asset_options, asset_name)
 
-        asset = self.gym.load_asset(self.sim, self._asset_root, self._shadow_hand_right_asset_file, asset_options)
+        asset = self.gym.load_asset(self.sim, self._asset_root, self._allegro_hand_right_asset_file, asset_options)
         if self.env_info_logging:
             print_links_and_dofs(self.gym, asset, asset_name)
 
@@ -1970,7 +2193,7 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         if self.env_info_logging:
             print_dof_properties(self.gym, asset, dof_props, asset_name)
 
-        self.target_shadow_center_index = self.gym.find_asset_rigid_body_index(asset, self._shadow_hand_center_prim)
+        self.target_allegro_center_index = self.gym.find_asset_rigid_body_index(asset, self._allegro_hand_center_prim)
         self.target_fingertip_indices = [
             self.gym.find_asset_rigid_body_index(asset, f"rh_{prim}") for prim in self._fingertips
         ]
@@ -1988,87 +2211,20 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         config["pose"] = pose
         config["dof_props"] = dof_props
 
-        print(">>> Target Shadow Hand loaded")
+        print(">>> Target allegro Hand loaded")
 
         return config
 
-    def __define_target_object(self, dataset: str = "oakink") -> Dict[str, Any]:
-        """Define & load objects for the target scene.
-
-        The objects loaded here are the same as the ones in the current scene, but with gravity disabled.
-
-        Args:
-            dataset (str, optional): Name of the dataset. Defaults to 'oakink'.
-
-        Returns:
-            Dict[str, Any]: The configuration of the target objects.
-        """
-        print(">>> Loading objects for target scene")
-        config = {}
-        config["warehouse"] = []
-
-        asset_options = gymapi.AssetOptions()
-        asset_options.disable_gravity = True
-        asset_options.density = 1000.0
-        asset_options.convex_decomposition_from_submeshes = False
-
-        # load assets to memory
-        if self.resample_object:
-            # resample to original distribution
-            if self.manipulated_object_codes is None:
-                object_codes = self.grasping_dataset.resample(self.num_envs * self.num_objects_per_env)
-                self.manipulated_object_codes = object_codes
-            else:
-                object_codes = self.manipulated_object_codes
-        else:
-            # select the first-k objects
-            object_codes = self.grasping_dataset.manipulated_codes
-
-        loaded = {}
-        for i, name in enumerate(object_codes):
-            if name in loaded:
-                cfg = config["warehouse"][loaded[name]].copy()
-            else:
-                loaded[name] = i
-                asset_filename = os.path.join(dataset, name, "decomposed.urdf")
-                asset = self.gym.load_asset(self.sim, self._asset_root, asset_filename, asset_options)
-                cfg = {"name": name, "asset": asset}
-                cfg["num_rigid_bodies"] = self.gym.get_asset_rigid_body_count(asset)
-                cfg["num_rigid_shapes"] = self.gym.get_asset_rigid_shape_count(asset)
-            config["warehouse"].append(cfg)
-        config["count"] = len(config["warehouse"])
-
-        num_rigid_bodies = [cfg["num_rigid_bodies"] for cfg in config["warehouse"]]
-        num_rigid_shapes = [cfg["num_rigid_shapes"] for cfg in config["warehouse"]]
-        config["num_rigid_bodies"] = sum(sorted(num_rigid_bodies, reverse=True)[: self.num_objects_per_env])
-        config["num_rigid_shapes"] = sum(sorted(num_rigid_shapes, reverse=True)[: self.num_objects_per_env])
-
-        # define object poses (unused and occupied)
-        unused_pose = gymapi.Transform()
-        unused_pose.p = gymapi.Vec3(0.0, 0.0, 5.0)
-
-        occupied_pose = gymapi.Transform()
-        occupied_pose.p = gymapi.Vec3(0.0, 0.0, 0.8)
-
-        num_objects_per_row = int(np.sqrt(self.num_objects_per_env))
-
-        config["poses"] = []
-        for i in range(self.num_objects_per_env):
-            row, col = i // num_objects_per_row, i % num_objects_per_row
-
-            x = unused_pose.p.x
-            y = unused_pose.p.y
-            z = unused_pose.p.z
-
-            x += col * self.object_spacing
-            y += row * self.object_spacing
-
-            pose = gymapi.Transform()
-            pose.p = gymapi.Vec3(x, y, z)
-            config["poses"].append(pose)
-        config["occupied_pose"] = occupied_pose
-
-        return config
+    def __define_target_object(self, dataset: str = "boxes") -> Dict[str, Any]:
+        """For singulation task, we don't need target objects with reference poses."""
+        # Return empty config as we don't need target objects for singulation
+        return {
+            "warehouse": [],
+            "count": 0,
+            "num_rigid_bodies": 0,
+            "num_rigid_shapes": 0,
+            "poses": []
+        }
 
     def __define_camera(self) -> None:
         """Define the cameras for the rendering."""
@@ -2106,39 +2262,31 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
             torch.tensor([self._table_x_length / 2, self._table_y_length / 2, 1.20], device=self.device),
         )
 
-    def __create_functional_grasping_dataset(self, device=None) -> None:
-        # load the functional grasping dataset (shadow hand dofs + object pose)
-        self.grasping_dataset = OakInkDataset(
-            os.path.join(self._data_root, self.dataset_dir),
+    def __create_box_grid_dataset(self, device=None) -> None:
+        # Create simple box grid dataset for singulation task
+        from .dataset import BoxGridDataset
+        
+        self.grasping_dataset = BoxGridDataset(
+            grid_rows=self._grid_rows,
+            grid_cols=self._grid_cols,
+            grid_layers=self._grid_layers,
+            box_width=self._box_width,
+            box_depth=self._box_depth,
+            box_height=self._box_height,
             device=device,
-            pcl_num=self.num_object_points,
-            num_object=self.num_objects,
-            queries=self.dataset_queries,
-            metainfo_path=self.dataset_metainfo_path,
-            skipcode_path=self.dataset_skipcode_path,
-            pose_level_sampling=self.dataset_pose_level_sampling,
-            precomputed_sdf=(self.method == "case"),
         )
 
         self.num_categories = self.grasping_dataset._category_matrix.shape[1]
+        
+
 
     def __reset_grasping_joint_indices(self) -> None:
         # if "target" in self.gym_assets and "robot" in self.gym_assets["target"]:
         #     asset = self.gym_assets["target"]["robot"]["asset"]
         # else:
-        #     asset = self.__define_target_shadow_hand()["asset"]
+        #     asset = self.__define_target_allegro_hand()["asset"]
 
         asset = self.gym_assets["target"]["robot"]["asset"]
-
-        if self.render_target:
-            current_robot = self.gym_assets["current"]["robot"]["asset"]
-            target_robot = self.gym_assets["target"]["robot"]["asset"]
-
-            offsets = [
-                self.gym.find_asset_dof_index(current_robot, name) - self.gym.find_asset_dof_index(target_robot, name)
-                for name in self.grasping_dataset.dof_names
-            ]
-            assert all([offset == offsets[0] for offset in offsets])
 
         indices = [self.gym.find_asset_dof_index(asset, name) for name in self.grasping_dataset.dof_names]
         print("grasping dataset joints:", self.grasping_dataset.dof_names)
@@ -2253,18 +2401,8 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         num_bodies += gym_assets["current"]["table"]["num_rigid_bodies"]
         num_shapes += gym_assets["current"]["table"]["num_rigid_shapes"]
 
-        if self.render_target:
-            num_bodies += gym_assets["target"]["robot"]["num_rigid_bodies"]
-            num_shapes += gym_assets["target"]["robot"]["num_rigid_shapes"]
-
-            num_target_objects = gym_assets["target"]["objects"]["count"]
-            for i in range(self.num_objects_per_env):
-                cur = (env * self.num_objects_per_env + i) % num_target_objects
-                num_bodies += gym_assets["target"]["objects"]["warehouse"][cur]["num_rigid_bodies"]
-                num_shapes += gym_assets["target"]["objects"]["warehouse"][cur]["num_rigid_shapes"]
-        else:
-            num_bodies += gym_assets["current"]["objects"]["warehouse"][0]["num_rigid_bodies"]
-            num_shapes += gym_assets["current"]["objects"]["warehouse"][0]["num_rigid_shapes"]
+        # num_bodies += gym_assets["current"]["objects"]["warehouse"][0]["num_rigid_bodies"]
+        # num_shapes += gym_assets["current"]["objects"]["warehouse"][0]["num_rigid_shapes"]
 
         return num_bodies, num_shapes
 
@@ -2276,15 +2414,12 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
 
         print(">>> Defining gym assets")
 
-        self.gym_assets["current"]["robot"] = self.__define_shadow_hand_with_arm()
+        self.gym_assets["current"]["robot"] = self.__define_allegro_hand_with_arm()
         self.gym_assets["current"]["objects"] = self.__define_object()
         self.gym_assets["current"]["table"] = self.__define_table()
 
-        if self.render_target:
-            self.gym_assets["target"]["robot"] = self.__define_target_shadow_hand()
-            self.gym_assets["target"]["objects"] = self.__define_target_object()
-        else:
-            self.gym_assets["target"]["robot"] = self.__define_target_shadow_hand()
+
+        # self.gym_assets["target"]["robot"] = self.__define_target_allegro_hand()
 
         self.__define_camera()
 
@@ -2295,17 +2430,15 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         self.envs = []
         self.cameras_handle = []
 
-        shadow_hand_indices = []
-        target_shadow_hand_indices = []
+        allegro_hand_indices = []
         table_indices = []
         object_indices = [[] for _ in range(num_envs)]
         object_encodings = [[] for _ in range(num_envs)]
         object_names = [[] for _ in range(num_envs)]
         occupied_object_indices = []
-
-        target_object_indices = [[] for _ in range(num_envs)]
-        target_object_names = [[] for _ in range(num_envs)]
-        target_occupied_object_indices = []
+        non_occupied_object_indices = [[] for _ in range(num_envs)]
+        scene_object_indices = [[] for _ in range(num_envs)]
+        occupied_object_indices_per_env = [random.randint(2, 2) for _ in range(num_envs)]
 
         print(">>> Creating environments")
         print("    - max_aggregate_bodies: ", max_aggregate_bodies)
@@ -2321,52 +2454,46 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
                 if not agg_success:
                     raise RuntimeError("begin_aggregate failed")
 
-            # add shadow hand to the environment
+            # add allegro hand to the environment
             actor_index, actor_handle = self.__create_sim_actor(
                 env, self.gym_assets["current"]["robot"], i, actor_handle=True
             )
-            shadow_hand_indices.append(actor_index)
+            allegro_hand_indices.append(actor_index)
 
-            # add objects to the environment
-            occupied_pose = self.gym_assets["current"]["objects"]["occupied_pose"]
+            # add box grid to the environment
             poses = self.gym_assets["current"]["objects"]["poses"]
             for k in range(self.num_objects_per_env):
-                index = (i * self.num_objects_per_env + k) % self.gym_assets["current"]["objects"]["count"]
-                cfg = self.gym_assets["current"]["objects"]["warehouse"][index]
-                pose = occupied_pose if k == 0 else poses[k]
-                actor_index = self.__create_sim_actor(env, cfg, i, f"object_{k}", pose)
+                cfg = self.gym_assets["current"]["objects"]["warehouse"][k % len(self.gym_assets["current"]["objects"]["warehouse"])]
+                pose = poses[k]
+                
+                non_target_color = gymapi.Vec3(0.9, 0.0, 0.0)
+                target_color = gymapi.Vec3(0.9, 0.9, 0.9)
+                
+                if occupied_object_indices_per_env[i] == k:
+                    color = target_color
+                    actor_index = self.__create_sim_actor(env, cfg, i, "target_object", pose, color=color)
+                else:
+                    color = non_target_color
+                    actor_index = self.__create_sim_actor(env, cfg, i, f"box_{k}", pose, color=color)
+                
+                
                 object_indices[i].append(actor_index)
                 object_names[i].append(cfg["name"])
-                object_encodings[i].append(self.grasping_dataset.get_object_index(cfg["name"]))
-                if k == 0:
-                    occupied_object_indices.append(actor_index)
+                object_encodings[i].append(k) 
+                
+                if occupied_object_indices_per_env[i] == k:
+                    occupied_object_indices.append(actor_index)  # global actor index for root_states access
+                else:
+                    non_occupied_object_indices[i].append(k)  #relative index within environment
+                
+                scene_object_indices[i].append(k)  # relative index within environment
 
             # add table to the environment
             actor_index, actor_handle = self.__create_sim_actor(
-                env, self.gym_assets["current"]["table"], i, actor_handle=True
+                env, self.gym_assets["current"]["table"], -1, actor_handle=True, color=gymapi.Vec3(0.0, 0.0, 0.0)
             )
             table_indices.append(actor_handle)
 
-            if self.render_target:
-                # add target shadow hand to the environment
-                actor_index = self.__create_sim_actor(env, self.gym_assets["target"]["robot"], i + self.num_envs)
-                target_shadow_hand_indices.append(actor_index)
-
-                # add target objects to the environment
-                occupied_pose = self.gym_assets["target"]["objects"]["occupied_pose"]
-                poses = self.gym_assets["target"]["objects"]["poses"]
-                for k in range(self.num_objects_per_env):
-                    index = (i * self.num_objects_per_env + k) % self.gym_assets["target"]["objects"]["count"]
-                    cfg = self.gym_assets["target"]["objects"]["warehouse"][index]
-                    pose = occupied_pose if k == 0 else poses[k]
-                    actor_index = self.__create_sim_actor(env, cfg, i + 2 * self.num_envs, f"target_object_{k}", pose)
-                    target_object_indices[i].append(actor_index)
-                    target_object_names[i].append(cfg["name"])
-                    if k == 0:
-                        target_occupied_object_indices.append(actor_index)
-            else:
-                cfg = self.gym_assets["current"]["objects"]["warehouse"][0]
-                actor_index = self.__create_sim_actor(env, cfg, i + 2 * self.num_envs, f"target_object_0", pose)
 
             if self.enable_rendered_pointcloud_observation or self.save_video:
                 for k in range(self.num_cameras_per_env):
@@ -2416,7 +2543,6 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
                 if not agg_success:
                     raise RuntimeError("end_aggregate failed")
 
-            if self.aggregate_mode != 0:
                 assert self.aggregate_tracker.aggregate_bodies == num_bodies
                 assert self.aggregate_tracker.aggregate_shapes == num_shapes
 
@@ -2424,54 +2550,36 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
 
         print(f">>> Done creating {num_envs} environments")
 
-        shadow_hand = self.gym.find_actor_handle(env, "shadow_hand")
-        self.shadow_hand_index = self.gym.get_actor_index(env, shadow_hand, gymapi.DOMAIN_ENV)
+        allegro_hand = self.gym.find_actor_handle(env, "allegro_hand")
+        self.allegro_hand_index = self.gym.get_actor_index(env, allegro_hand, gymapi.DOMAIN_ENV)
 
-        if self.render_target:
-            target_shadow_hand = self.gym.find_actor_handle(env, "target_shadow_hand")
-            self.target_shadow_hand_index = self.gym.get_actor_index(env, target_shadow_hand, gymapi.DOMAIN_ENV)
 
-        # define start and end indices for shadow hand DOFs to create contiguous slices
-        self.shadow_hand_dof_start = self.gym.get_actor_dof_index(env, shadow_hand, 0, gymapi.DOMAIN_ENV)
-        self.shadow_hand_dof_end = self.shadow_hand_dof_start + self.gym_assets["current"]["robot"]["num_dofs"]
-        self.shadow_hand_indices = torch.tensor(shadow_hand_indices).long().to(self.device)
-        self.shadow_hand_rigid_body_start = self.gym.get_actor_rigid_body_index(env, shadow_hand, 0, gymapi.DOMAIN_ENV)
-        self.shadow_hand_rigid_body_end = (
-            self.shadow_hand_rigid_body_start + self.gym_assets["current"]["robot"]["num_rigid_bodies"]
+        # define start and end indices for allegro hand DOFs to create contiguous slices
+        self.allegro_hand_dof_start = self.gym.get_actor_dof_index(env, allegro_hand, 0, gymapi.DOMAIN_ENV)
+        self.allegro_hand_dof_end = self.allegro_hand_dof_start + self.gym_assets["current"]["robot"]["num_dofs"]
+        self.allegro_hand_indices = torch.tensor(allegro_hand_indices).long().to(self.device)
+        self.allegro_hand_rigid_body_start = self.gym.get_actor_rigid_body_index(env, allegro_hand, 0, gymapi.DOMAIN_ENV)
+        self.allegro_hand_rigid_body_end = (
+            self.allegro_hand_rigid_body_start + self.gym_assets["current"]["robot"]["num_rigid_bodies"]
         )
 
-        if self.render_target:
-            self.target_shadow_hand_dof_start = self.gym.get_actor_dof_index(
-                env, target_shadow_hand, 0, gymapi.DOMAIN_ENV
-            )
-            self.target_shadow_hand_dof_end = (
-                self.target_shadow_hand_dof_start + self.gym_assets["target"]["robot"]["num_dofs"]
-            )
-            self.target_shadow_hand_rigid_body_start = self.gym.get_actor_rigid_body_index(
-                env, target_shadow_hand, 0, gymapi.DOMAIN_ENV
-            )
-            self.target_shadow_hand_rigid_body_end = (
-                self.target_shadow_hand_rigid_body_start + self.gym_assets["target"]["robot"]["num_rigid_bodies"]
-            )
-            self.target_shadow_hand_indices = torch.tensor(target_shadow_hand_indices).long().to(self.device)
 
         self.table_indices = torch.tensor(table_indices).long().to(self.device)
 
         self.object_indices = torch.tensor(object_indices).long().to(self.device)
         self.object_names = object_names
         self.object_encodings = torch.tensor(object_encodings).long().to(self.device)
-        self.occupied_object_indices = torch.tensor(occupied_object_indices).long().to(self.device)
+        # Pad non_occupied_object_indices to ensure consistent tensor shape
+        max_non_targets = self.num_objects_per_env - 1  # Maximum possible non-target objects per env
+        for i in range(num_envs):
+            while len(non_occupied_object_indices[i]) < max_non_targets:
+                non_occupied_object_indices[i].append(-1)  # Pad with -1 (invalid index)
+        
+        self.occupied_object_indices = torch.tensor(occupied_object_indices).long().to(self.device) # (env_id) - global actor indices
+        self.occupied_object_relative_indices = torch.tensor(occupied_object_indices_per_env).long().to(self.device) # (env_id) - relative indices 0 to num_objects_per_env-1
+        self.non_occupied_object_indices = torch.tensor(non_occupied_object_indices).long().to(self.device) # (env_id, max_non_targets)
+        self.scene_object_indices = torch.tensor(scene_object_indices).long().to(self.device) # (env_id, object_id)
 
-        if self.render_target:
-            self.target_object_indices = torch.tensor(target_object_indices).long().to(self.device)
-            self.target_occupied_object_indices = torch.tensor(target_occupied_object_indices).long().to(self.device)
-
-        self.object_actor_start = self.object_indices[0, 0]
-        self.object_actor_end = self.object_indices[0, -1] + 1
-
-        if self.render_target:
-            self.target_object_actor_start = self.target_object_indices[0, 0]
-            self.target_object_actor_end = self.target_object_indices[0, -1] + 1
 
     def create_sim(self):
         self.dt = self.cfg["sim"]["dt"]
@@ -2533,6 +2641,8 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
                 )
             elif "velocity" in spec.tags:
                 observation = observation * self.velocity_observation_scale
+            elif "orientation" in spec.tags:
+                observation = quat_to_6d(observation)
 
             observations[spec.name] = observation
 
@@ -2584,7 +2694,7 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         if self.relative_part_reward:
             no_prev_dist_ids = torch.where(self.prev_rot_dist == -1)[0]
             self.prev_rot_dist[no_prev_dist_ids] = self.rot_dist[no_prev_dist_ids].clone()
-            rot_rew = (self.prev_rot_dist - self.rot_dist) / (self._max_ur_endeffector_rot_vel * self.dt)
+            rot_rew = (self.prev_rot_dist - self.rot_dist) / (self._max_xarm_endeffector_rot_vel * self.dt)
             self.prev_rot_dist = self.rot_dist.clone()
         else:
             rot_rew = 1.0 / (torch.abs(self.rot_dist) + self.rot_eps)
@@ -2609,7 +2719,7 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         if self.relative_part_reward:
             no_prev_dist_ids = torch.where(self.prev_pos_dist == -1)[0]
             self.prev_pos_dist[no_prev_dist_ids] = self.pos_dist[no_prev_dist_ids].clone()
-            pos_rew = (self.prev_pos_dist - self.pos_dist) / (self._max_ur_endeffector_pos_vel * self.dt)
+            pos_rew = (self.prev_pos_dist - self.pos_dist) / (self._max_xarm_endeffector_pos_vel * self.dt)
             self.prev_pos_dist = self.pos_dist.clone()
         else:
             pos_rew = (1.0 / trans_scale) / (torch.abs(self.pos_dist) + self.rot_eps / trans_scale)
@@ -2717,40 +2827,40 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
     def compute_contact_reward(self, mutual=False):
         # fingerjoint error
         self.fj_dist = F.pairwise_distance(
-            self.shadow_hand_dof_positions[:, self.shadow_digits_actuated_dof_indices],
-            self._r_target_shadow_digits_actuated_dof_positions,
+            self.allegro_hand_dof_positions[:, self.allegro_digits_actuated_dof_indices],
+            self._r_target_allegro_digits_actuated_dof_positions,
         )
         # print("object_targets")
         # print(self.object_targets.shape)
-        # print(self.target_shadow_hand_dof_positions.shape)
+        # print(self.target_allegro_hand_dof_positions.shape)
         # print(self.object_targets[:, 7:])
-        # print(self.target_shadow_hand_dof_positions.device, self.actuated_dof_indices.device)
-        # print(self.target_shadow_hand_dof_positions.shape)
+        # print(self.target_allegro_hand_dof_positions.device, self.actuated_dof_indices.device)
+        # print(self.target_allegro_hand_dof_positions.shape)
         # print(self.actuated_dof_indices)
-        # print(self.target_shadow_hand_dof_positions[:, self.actuated_dof_indices])
+        # print(self.target_allegro_hand_dof_positions[:, self.actuated_dof_indices])
         # self.fj_dist = (
-        #     self.shadow_hand_dof_positions[:, self.shadow_digits_actuated_dof_indices] - self.object_targets[:, 7:]
-        # ).norm(p=1, dim=1) / len(self.shadow_actuated_dof_indices)
+        #     self.allegro_hand_dof_positions[:, self.allegro_digits_actuated_dof_indices] - self.object_targets[:, 7:]
+        # ).norm(p=1, dim=1) / len(self.allegro_actuated_dof_indices)
         self.extras["fj_dist"] = self.fj_dist.clone()
 
         if "fjcontact" in self.reward_type:
             # fingerjoint error
             if high_thumb_reward:
                 finger_dof_dis = F.pairwise_distance(
-                    self.shadow_hand_dof_positions[:, self.shadow_fingers_actuated_dof_indices],
-                    self._r_target_shadow_fingers_actuated_dof_positions,
+                    self.allegro_hand_dof_positions[:, self.allegro_fingers_actuated_dof_indices],
+                    self._r_target_allegro_fingers_actuated_dof_positions,
                 )
                 thumb_dof_dis = F.pairwise_distance(
-                    self.shadow_hand_dof_positions[:, self.shadow_thumb_actuated_dof_indices],
-                    self._r_target_shadow_thumb_actuated_dof_positions,
+                    self.allegro_hand_dof_positions[:, self.allegro_thumb_actuated_dof_indices],
+                    self._r_target_allegro_thumb_actuated_dof_positions,
                 )
                 self.contact_dist = torch.sqrt(
                     finger_dof_dis * finger_dof_dis * 9 / 13 + thumb_dof_dis * thumb_dof_dis * 9 / 5
                 )
             else:
                 self.contact_dist = F.pairwise_distance(
-                    self.shadow_hand_dof_positions[:, self.shadow_digits_actuated_dof_indices],
-                    self._r_target_shadow_digits_actuated_dof_positions,
+                    self.allegro_hand_dof_positions[:, self.allegro_digits_actuated_dof_indices],
+                    self._r_target_allegro_digits_actuated_dof_positions,
                 )
 
             if self.relative_part_reward:
@@ -2761,8 +2871,8 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
             else:
                 contact_rew = 10.0 * self.contact_eps / (torch.abs(self.contact_dist) + self.contact_eps)
             # self.contact_dist = (
-            #     self.shadow_hand_dof_positions[:, self.shadow_digits_actuated_dof_indices] - self.object_targets[:, 7:]
-            # ).norm(p=1, dim=1) / len(self.shadow_actuated_dof_indices)
+            #     self.allegro_hand_dof_positions[:, self.allegro_digits_actuated_dof_indices] - self.object_targets[:, 7:]
+            # ).norm(p=1, dim=1) / len(self.allegro_actuated_dof_indices)
             self.extras["contact_dist"] = self.contact_dist.clone()
 
             if negative_part_reward:
@@ -2942,7 +3052,7 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
             action_penalty = torch.sum(actions**2, dim=-1)
             self.action_penalty_scaled = action_penalty * self.action_penalty_scale
         elif self.wrist_action_penalty_scale < 0:
-            action_penalty = torch.sum(self.shadow_dof_speeds[:2] ** 2, dim=-1)
+            action_penalty = torch.sum(self.allegro_dof_speeds[:2] ** 2, dim=-1)
             self.action_penalty_scaled = action_penalty * self.wrist_action_penalty_scale
         elif self.arm_action_penalty_scale < 0:
             ur_action = torch.cat([self.eef_translation, self.eef_rotation], dim=1)
@@ -2998,31 +3108,31 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         curr_endeffector_positions = self.endeffector_positions.clone()
         curr_endeffector_orientations = self.endeffector_orientations.clone()
         curr_endeffector_orientations_euler = torch.stack(get_euler_xyz(curr_endeffector_orientations), dim=1)
-        curr_shadow_actuated_dof_positions = self.shadow_hand_dof_positions[:, self.shadow_actuated_dof_indices].clone()
+        curr_allegro_actuated_dof_positions = self.allegro_hand_dof_positions[:, self.allegro_actuated_dof_indices].clone()
 
         curr_endeffector_orientations_norm = torch.arccos(torch.cos(curr_endeffector_orientations_euler))
         prev_endeffector_orientations_norm = torch.arccos(torch.cos(self.prev_endeffector_orientations_euler))
 
         diff_endeffector_positions = curr_endeffector_positions - self.prev_endeffector_positions
         diff_endeffector_orientations = curr_endeffector_orientations_norm - prev_endeffector_orientations_norm
-        diff_shadow_actuated_dof_positions = (
-            curr_shadow_actuated_dof_positions - self.prev_shadow_actuated_dof_positions
+        diff_allegro_actuated_dof_positions = (
+            curr_allegro_actuated_dof_positions - self.prev_allegro_actuated_dof_positions
         )
 
         delta_arm_pos_state = diff_endeffector_positions
         delta_arm_rot_state = diff_endeffector_orientations
-        delta_hand_state = diff_shadow_actuated_dof_positions
+        delta_hand_state = diff_allegro_actuated_dof_positions
 
         arm_pos_similarity = (
             delta_arm_pos_state
             * self.action_gf[:, self.arm_trans_action_indices]
             / (abs(self.action_gf[:, self.arm_trans_action_indices]) + 1e-5)
-        ) / (self._max_ur_endeffector_pos_vel * self.dt)
+        ) / (self._max_xarm_endeffector_pos_vel * self.dt)
         arm_rot_similarity = (
             delta_arm_rot_state
             * self.action_gf[:, self.arm_rot_action_indices]
             / (abs(self.action_gf[:, self.arm_rot_action_indices]) + 1e-5)
-        ) / (self._max_ur_endeffector_rot_vel * self.dt)
+        ) / (self._max_xarm_endeffector_rot_vel * self.dt)
         hand_similarity = (
             delta_hand_state
             * self.action_gf[:, self.hand_action_indices]
@@ -3075,34 +3185,173 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         self.manipulability_penalty_scaled = manipulability_penalty * self.manipulability_penalty_scale
         self.extras["manipulability_penalty"] = self.manipulability_penalty_scaled.clone()
 
+    def compute_tilt_reward(self):
+        """Compute tilt reward - reward for tilting the object toward the target rotation (-45 degrees around x-axis)."""
+        # Get current object orientation as euler angles
+        from .torch_utils import get_euler_xyz
+        current_euler = torch.stack(get_euler_xyz(self.object_root_orientations), dim=1)
+        
+        # Target rotation: -45 degrees around x-axis
+        target_x_rotation = self.goal_rotation_x
+        
+        # Compute rotation error around x-axis
+        x_rotation_error = torch.abs(current_euler[:, 0] - target_x_rotation)
+        
+        # Reward proportional to progress towards target rotation
+        # Use exponential decay: closer to target = higher reward
+        self.tilt_reward = torch.exp(-x_rotation_error / 0.1)  # 0.1 is scaling factor
+        self.tilt_reward_scaled = self.tilt_reward * self.tilt_reward_scale
+        
+        self.extras["tilt_reward"] = self.tilt_reward_scaled.clone()
+        self.extras["x_rotation_error"] = x_rotation_error.clone()
+
+    def compute_slide_reward(self):
+        """Compute slide reward - reward for moving the object forward along z-axis."""
+
+        y_displacement = self.object_root_positions[:, 1] - self.occupied_object_init_root_positions[:, 1]
+        
+        # Target displacement is goal_translation_z (e.g., 25cm forward)
+        target_y_displacement = self.goal_translation_y
+        
+        # Compute distance to target z position
+        y_error = torch.abs(y_displacement - target_y_displacement)
+        
+        # Reward inversely proportional to distance from target
+        # ln(40 * (-y_error + 1.25))
+        # self.slide_reward = torch.log(160 * (-y_error + 1.25))
+        self.slide_reward = torch.clamp(-160 * (y_error - 0.25) * (y_error + 0.25), min=0)
+        self.slide_reward_scaled = self.slide_reward * self.slide_reward_scale
+        
+        self.extras["slide_reward"] = self.slide_reward_scaled.clone()
+        self.extras["y_displacement"] = y_displacement.clone()
+        self.extras["y_error"] = y_error.clone()
+
+    def compute_neighbor_stability_penalty(self):
+        """Compute neighboring object stability penalty - negative reward for moving non-target objects."""
+        if self.non_occupied_object_indices.numel() == 0:
+            # No non-target objects, no penalty
+            self.neighbor_stability_penalty = torch.zeros(self.num_envs, device=self.device)
+            self.neighbor_stability_penalty_scaled = torch.zeros(self.num_envs, device=self.device)
+            return
+            
+        # Get current positions of all scene objects
+        current_positions = self.scene_object_root_positions  # (num_envs, num_objects_per_env, 3)
+        
+        # Get initial positions from box grid generation (assume they start at grid positions)
+        initial_positions = torch.zeros_like(current_positions)
+        for env_idx in range(self.num_envs):
+            for obj_idx in range(self.num_objects_per_env):
+                # Use the original grid pose for each object
+                original_pose = self.gym_assets["current"]["objects"]["poses"][obj_idx]
+                initial_positions[env_idx, obj_idx] = torch.tensor(
+                    [original_pose.p.x, original_pose.p.y, original_pose.p.z], 
+                    device=self.device
+                )
+        
+        # Calculate displacement for all objects
+        displacements = torch.norm(current_positions - initial_positions, dim=2)  # (num_envs, num_objects_per_env)
+        
+        # Only consider non-target objects for penalty
+        # Create mask for non-target objects
+        non_target_mask = torch.ones((self.num_envs, self.num_objects_per_env), device=self.device, dtype=torch.bool)
+        for env_idx in range(self.num_envs):
+            target_obj_idx = self.occupied_object_relative_indices[env_idx]
+            non_target_mask[env_idx, target_obj_idx] = False
+        
+        # Apply mask to displacements
+        non_target_displacements = displacements * non_target_mask.float()
+        
+        # Sum displacement of all non-target objects per environment
+        total_non_target_displacement = torch.sum(non_target_displacements, dim=1)
+        
+        # Penalty proportional to total displacement (negative because it's a penalty)
+        self.neighbor_stability_penalty = total_non_target_displacement
+        self.neighbor_stability_penalty_scaled = self.neighbor_stability_penalty * self.neighbor_stability_penalty_scale
+        
+        self.extras["neighbor_stability_penalty"] = self.neighbor_stability_penalty_scaled.clone()
+        self.extras["total_non_target_displacement"] = total_non_target_displacement.clone()
+
+    def compute_stability_penalty(self):
+        """Compute penalty for unwanted Y and Z axis rotations (keep object stable in those dimensions)."""
+        from .torch_utils import get_euler_xyz
+        
+        # Get current object orientation as euler angles
+        current_euler = torch.stack(get_euler_xyz(self.object_root_orientations), dim=1)
+        
+        # Extract Y and Z rotations (we want these to stay close to 0)
+        y_rotation = current_euler[:, 1]  # Y-axis rotation (pitch)
+        z_rotation = current_euler[:, 2]  # Z-axis rotation (yaw)
+        
+        # Normalize angles to [-π, π] range (closest to 0)
+        y_rotation_normalized = torch.atan2(torch.sin(y_rotation), torch.cos(y_rotation))
+        z_rotation_normalized = torch.atan2(torch.sin(z_rotation), torch.cos(z_rotation))
+        
+        # Compute penalties for deviations from 0 for both Y and Z axes
+        y_rotation_error = torch.abs(y_rotation_normalized)
+        z_rotation_error = torch.abs(z_rotation_normalized)
+        
+        # Combined stability penalty (penalize both Y and Z rotations)
+        total_rotation_error = y_rotation_error + z_rotation_error
+        self.stability_penalty_scaled = total_rotation_error * self.stability_penalty_scale
+        
+        # Store individual components for debugging
+        self.y_rotation_error = y_rotation_error
+        self.z_rotation_error = z_rotation_error
+        self.y_rotation_normalized = y_rotation_normalized  # Store normalized values
+        self.z_rotation_normalized = z_rotation_normalized
+        
+        self.extras["stability_penalty"] = self.stability_penalty_scaled.clone()
+
+    def compute_singulation_success_reward(self):
+        """Compute success reward based on reaching the goal pose (position + rotation)."""
+        # Check position success: z-displacement within tolerance
+        y_displacement = self.object_root_positions[:, 1] - self.occupied_object_init_root_positions[:, 1]
+        position_success = torch.abs(y_displacement - self.goal_translation_y) <= self.goal_tolerance_position
+        
+        # Check rotation success: x-rotation within tolerance  
+        from .torch_utils import get_euler_xyz
+        current_euler = torch.stack(get_euler_xyz(self.object_root_orientations), dim=1)
+        rotation_error = torch.abs(current_euler[:, 0] - self.goal_rotation_x)
+        rotation_success = rotation_error <= self.goal_tolerance_rotation
+        
+        # Overall success: both position and rotation criteria met
+        self.singulation_success = position_success & rotation_success
+        
+        # Convert to reward
+        self.succ_rew = self.singulation_success.float()
+        self.succ_rew_scaled = self.succ_rew * self.reach_goal_bonus
+        
+        self.extras["singulation_success"] = self.succ_rew.clone()
+        self.extras["position_success"] = position_success.float()
+        self.extras["rotation_success"] = rotation_success.float()
+
     def compute_done(self):
         if not test_sim:
             # if len(self.arm_roll_action_indices) == 0:
             if self.env_mode == "pgm":
-                # object fall TODO more general fall?
-                fall_env_ids = (
-                    (self.object_root_positions[:, 2] < self._table_pose[2] - 0.1).nonzero(as_tuple=False).squeeze(-1)
+                fall_env_mask = (
+                    (self.object_root_positions[:, 2] < self._table_pose[2] - 0.1)
                 )
+                arm_contact_mask = (self.arm_contact_forces.norm(p=2, dim=2) > 1).any(dim=1)
+                
+                failed_env_ids = (fall_env_mask | arm_contact_mask).nonzero(as_tuple=False).squeeze(-1)
             else:
-                # object fall TODO more general fall?
-                fall_env_ids = (
-                    (self.object_root_positions[:, 2] < self.shadow_hand_center_positions[:, 2] - 0.2)
-                    .nonzero(as_tuple=False)
-                    .squeeze(-1)
+                fall_env_mask = (
+                    (self.object_root_positions[:, 2] < self.allegro_hand_center_positions[:, 2] - 0.2)
                 )
-            # else:
-            #     obj2palm_dist = F.pairwise_distance(
-            #         self.object_root_positions[:, :2], self.shadow_hand_mfknuckle_positions[:, :2]
-            #     )
-            #     fall_env_ids = (obj2palm_dist > 0.15).nonzero(as_tuple=False).squeeze(-1)
-            self.reset_buf[fall_env_ids] = 1
+                arm_contact_mask = (self.arm_contact_forces.norm(p=2, dim=2) > 1).any(dim=1)
+                
+                failed_env_ids = (fall_env_mask | arm_contact_mask).nonzero(as_tuple=False).squeeze(-1)
+                
+                
+            self.reset_buf[failed_env_ids] = 1
 
         # success
         succ_env_ids = self.succ_rew.nonzero(as_tuple=False).squeeze(-1)
         self.reset_buf[succ_env_ids] = 1
         self.successes[succ_env_ids] = 1
 
-        self.done_successes[fall_env_ids] = 0
+        self.done_successes[failed_env_ids] = 0
         self.done_successes[succ_env_ids] = 1
 
         if "height" in self.reward_type:
@@ -3117,36 +3366,49 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         # quat_dist = 2.0 * torch.asin(torch.clamp(torch.norm(quat_diff[:, 0:3], p=2, dim=-1), max=1.0))
         # max_quat_dist = torch.max(quat_dist)
         # fj_dist_1 = (
-        #     self.shadow_hand_dof_positions[:, self.shadow_digits_actuated_dof_indices] - self.object_targets[:, 7:]
-        # ).norm(p=1, dim=1) / len(self.shadow_digits_actuated_dof_indices)
+        #     self.allegro_hand_dof_positions[:, self.allegro_digits_actuated_dof_indices] - self.object_targets[:, 7:]
+        # ).norm(p=1, dim=1) / len(self.allegro_digits_actuated_dof_indices)
         # fj_dist_2 = (
-        #     self.shadow_hand_dof_positions[:, self.shadow_digits_actuated_dof_indices] - self.object_targets[:, 7:]
-        # ).norm(p=2, dim=1) / len(self.shadow_digits_actuated_dof_indices)
+        #     self.allegro_hand_dof_positions[:, self.allegro_digits_actuated_dof_indices] - self.object_targets[:, 7:]
+        # ).norm(p=2, dim=1) / len(self.allegro_digits_actuated_dof_indices)
         # max_fj_dist_1 = torch.max(fj_dist_1)
         # max_fj_dist_2 = torch.max(fj_dist_2)
         # print(max_pos_dist, max_quat_dist, max_fj_dist_1, max_fj_dist_2)
-        # print(self._max_ur_endeffector_pos_vel*self.dt, self._max_ur_endeffector_rot_vel*self.dt, self.dof_speed_scale*self.dt)
+        # print(self._max_xarm_endeffector_pos_vel*self.dt, self._max_xarm_endeffector_rot_vel*self.dt, self.dof_speed_scale*self.dt)
         self.reset_buf[:] = torch.where(self.progress_buf >= self.max_episode_length - 1, 1, self.reset_buf)
         self.done_successes[self.reset_buf.nonzero(as_tuple=False).squeeze(-1)] = 0
 
-        if self.env_mode == "orn":
-            self.compute_ori_reward()
-        if self.env_mode == "relpose":
-            if "mutual" in self.reward_type:
-                self.compute_mutual_reward()
-            else:
-                self.compute_ori_reward()
-                if not test_rel:
-                    self.compute_pos_reward()
-        if self.env_mode == "relposecontact" or self.env_mode == "pgm":
-            if "mutual" in self.reward_type:
-                self.compute_mutual_reward()
-            else:
-                self.compute_ori_reward()
-                self.compute_pos_reward()
-                self.compute_contact_reward()
+        # if self.env_mode == "orn":
+        #     self.compute_ori_reward()
+        # if self.env_mode == "relpose":
+        #     if "mutual" in self.reward_type:
+        #         self.compute_mutual_reward()
+        #     else:
+        #         self.compute_ori_reward()
+        #         if not test_rel:
+        #             self.compute_pos_reward()
+        # if self.env_mode == "relposecontact" or self.env_mode == "pgm":
+        #     if "mutual" in self.reward_type:
+        #         self.compute_mutual_reward()
+        #     else:
+        #         self.compute_ori_reward()
+        #         self.compute_pos_reward()
+        #         self.compute_contact_reward()
 
-        self.compute_succ_reward()
+        # self.compute_succ_reward()
+        # Singulation-specific rewards
+        if "tilt" in self.reward_type:
+            self.compute_tilt_reward()
+        if "slide" in self.reward_type:
+            self.compute_slide_reward()
+        if "neighbor" in self.reward_type:
+            self.compute_neighbor_stability_penalty()
+        if "stability" in self.reward_type:
+            self.compute_stability_penalty()
+        
+        # Use new singulation success criteria instead of old success reward
+        self.compute_singulation_success_reward()
+        
         self.compute_action_reward(actions)
         if "nominal" in self.reward_type:
             self.compute_reorient_obj_reward()
@@ -3161,40 +3423,109 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
             self.extras["obj_height"] = self.delta_obj_height.clone()
             self.extras["height_rew"] = self.height_rew_scaled.clone()
 
-        self.extras["rot_rew"] = self.rot_rew_scaled.clone()
+        # self.extras["rot_rew"] = self.rot_rew_scaled.clone()
         self.extras["succ_rew"] = self.succ_rew_scaled.clone()
         self.extras["action_penalty"] = self.action_penalty_scaled.clone()
-        if not test_rel and self.env_mode == "relpose":
-            self.extras["tran_rew"] = self.pos_rew_scaled.clone()
-        if self.env_mode == "relposecontact" or self.env_mode == "pgm":
-            self.extras["tran_rew"] = self.pos_rew_scaled.clone()
-            self.extras["contact_rew"] = self.contact_rew_scaled.clone()
+        
+        # Log singulation-specific rewards
+        if "tilt" in self.reward_type:
+            self.extras["tilt_rew"] = self.tilt_reward_scaled.clone()
+        if "slide" in self.reward_type:
+            self.extras["slide_rew"] = self.slide_reward_scaled.clone()
+        if "neighbor" in self.reward_type:
+            self.extras["neighbor_penalty"] = self.neighbor_stability_penalty_scaled.clone()
+        if "stability" in self.reward_type:
+            self.extras["stability_penalty"] = self.stability_penalty_scaled.clone()
+            
+        # Log debug info for singulation
+        if hasattr(self, 'x_rotation_error'):
+            self.extras["x_rotation_error"] = self.x_rotation_error.clone()
+        if hasattr(self, 'y_rotation_error'):
+            self.extras["y_rotation_error"] = self.y_rotation_error.clone()
+        if hasattr(self, 'z_rotation_error'):
+            self.extras["z_rotation_error"] = self.z_rotation_error.clone()
+        if hasattr(self, 'y_rotation_normalized'):
+            self.extras["y_rotation_normalized"] = self.y_rotation_normalized.clone()
+        if hasattr(self, 'z_rotation_normalized'):
+            self.extras["z_rotation_normalized"] = self.z_rotation_normalized.clone()
+        if hasattr(self, 'z_displacement'):
+            self.extras["z_displacement"] = self.z_displacement.clone()
+        if hasattr(self, 'neighbor_displacement'):
+            self.extras["neighbor_displacement"] = self.neighbor_displacement.clone()
+            
+        # Log legacy rewards for backward compatibility
+        # if hasattr(self, 'rot_rew_scaled'):
+        #     self.extras["rot_rew"] = self.rot_rew_scaled.clone()
+        # if not test_rel and self.env_mode == "relpose":
+        #     if hasattr(self, 'pos_rew_scaled'):
+        #         self.extras["tran_rew"] = self.pos_rew_scaled.clone()
+        # if self.env_mode == "relposecontact" or self.env_mode == "pgm":
+        #     if hasattr(self, 'pos_rew_scaled'):
+        #         self.extras["tran_rew"] = self.pos_rew_scaled.clone()
+        #     if hasattr(self, 'contact_rew_scaled'):
+        #         self.extras["contact_rew"] = self.contact_rew_scaled.clone()
 
+        # Base reward components
         self.rew_buf[:] = (
-            self.rot_rew_scaled + self.succ_rew_scaled + self.action_penalty_scaled + self.time_step_penatly
+            self.succ_rew_scaled + self.action_penalty_scaled + self.time_step_penatly
         )
-        if not test_rel and self.env_mode == "relpose":
-            self.rew_buf[:] += self.pos_rew_scaled
-        if self.env_mode == "relposecontact" or self.env_mode == "pgm":
-            if "pclcontactonly" in self.reward_type or "pclcontactmatch" in self.reward_type:
-                self.rew_buf[:] = (
-                    self.contact_rew_scaled + self.succ_rew_scaled + self.action_penalty_scaled + self.time_step_penatly
-                )
-            else:
-                self.rew_buf[:] += self.pos_rew_scaled + self.contact_rew_scaled
+        
+        # Add singulation-specific rewards
+        if "tilt" in self.reward_type:
+            self.rew_buf[:] += self.tilt_reward_scaled
+        if "slide" in self.reward_type:
+            self.rew_buf[:] += self.slide_reward_scaled  
+        if "neighbor" in self.reward_type:
+            self.rew_buf[:] += self.neighbor_stability_penalty_scaled
+        if "stability" in self.reward_type:
+            self.rew_buf[:] += self.stability_penalty_scaled
+            
+        # Debug final reward composition periodically
+        # if self.env_info_logging and hasattr(self, 'progress_buf') and self.progress_buf[0] % 100 == 0:
+        #     print(f"\n=== REWARD BREAKDOWN (env 0, step {self.progress_buf[0]}) ===")
+        #     print(f"Total reward: {self.rew_buf[0].item():.4f}")
+        #     print(f"Success reward: {self.succ_rew_scaled[0].item():.4f}")
+        #     print(f"Action penalty: {self.action_penalty_scaled[0].item():.4f}")
+        #     if "tilt" in self.reward_type:
+        #         print(f"Tilt reward: {self.tilt_reward_scaled[0].item():.4f}")
+        #     if "slide" in self.reward_type:
+        #         print(f"Slide reward: {self.slide_reward_scaled[0].item():.4f}")
+        #     if "neighbor" in self.reward_type:
+        #         print(f"Neighbor penalty: {self.neighbor_stability_penalty_scaled[0].item():.4f}")
+        #     if hasattr(self, 'rot_rew_scaled'):
+        #         print(f"Rotation reward: {self.rot_rew_scaled[0].item():.4f}")
+        #     if hasattr(self, 'pos_rew_scaled'):
+        #         print(f"Position reward: {self.pos_rew_scaled[0].item():.4f}")
+        #     if hasattr(self, 'contact_rew_scaled'):
+        #         print(f"Contact reward: {self.contact_rew_scaled[0].item():.4f}")
+        #     print(f"================================================\n")
+            
+        # Legacy reward terms (keep for backward compatibility)
+        # if hasattr(self, 'rot_rew_scaled'):
+        #     self.rew_buf[:] += self.rot_rew_scaled
+        
+        # if not test_rel and self.env_mode == "relpose":
+        #     self.rew_buf[:] += self.pos_rew_scaled
+        # if self.env_mode == "relposecontact" or self.env_mode == "pgm":
+        #     if "pclcontactonly" in self.reward_type or "pclcontactmatch" in self.reward_type:
+        #         self.rew_buf[:] = (
+        #             self.contact_rew_scaled + self.succ_rew_scaled + self.action_penalty_scaled + self.time_step_penatly
+        #         )
+        #     else:
+        #         self.rew_buf[:] += self.pos_rew_scaled + self.contact_rew_scaled
 
-            if self.env_mode == "pgm" and "height" in self.reward_type:
-                self.rew_buf[:] += self.height_rew_scaled
-            if "nominal" in self.reward_type:
-                self.rew_buf[:] += self.nominal_rew_scaled
-            if "ft2oc" in self.reward_type:
-                self.rew_buf[:] += self.ft2oc_rew_scaled
-            if "similarity" in self.reward_type:
-                self.rew_buf[:] += self.similarity_reward_scaled * (
-                    self.progress_buf % self.similarity_reward_freq == 0
-                )
-            if "manipen" in self.reward_type:
-                self.rew_buf[:] += self.manipulability_penalty_scaled
+        #     if self.env_mode == "pgm" and "height" in self.reward_type:
+        #         self.rew_buf[:] += self.height_rew_scaled
+        #     if "nominal" in self.reward_type:
+        #         self.rew_buf[:] += self.nominal_rew_scaled
+        #     if "ft2oc" in self.reward_type:
+        #         self.rew_buf[:] += self.ft2oc_rew_scaled
+        #     if "similarity" in self.reward_type:
+        #         self.rew_buf[:] += self.similarity_reward_scaled * (
+        #             self.progress_buf % self.similarity_reward_freq == 0
+        #         )
+        #     if "manipen" in self.reward_type:
+        #         self.rew_buf[:] += self.manipulability_penalty_scaled
 
         self.compute_done()
 
@@ -3253,44 +3584,57 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         if self.action_noise and self.action_noise_level == "step" and self.action_noise_max_times > 0:
             self.action_noise_times[env_ids] = 0
 
-        # random select one object
-        occupied_object_indices = torch.randint_like(env_ids, 0, self.num_objects_per_env)
-        self.occupied_object_indices[env_ids] = self.object_indices[env_ids, occupied_object_indices]
-
-        if self.render_target:
-            self.target_occupied_object_indices[env_ids] = self.target_object_indices[env_ids, occupied_object_indices]
+        # Get relative indices for occupied objects in the resetting environments
+        occupied_object_relative_indices = self.occupied_object_relative_indices[env_ids]
 
         if self.env_info_logging:
             for i, env_id in enumerate(env_ids):
-                print(env_id, self.object_names[env_id][occupied_object_indices[i]])
+                print(env_id, self.object_names[env_id][occupied_object_relative_indices[i]])
 
+        # For singulation task, we don't need target poses from grasping dataset
+        # Instead, we use the box grid dataset for simple object selection
+        
+        # Comment out the grasping dataset sampling that's not needed for singulation
         # random sample grasp example
-        object_indices = self.object_encodings[env_ids, occupied_object_indices]
+        # object_indices = self.object_encodings[env_ids, occupied_object_relative_indices]
+        # examples = self.grasping_dataset.sample(object_indices)
+        # joints = examples["joints"]
+        # poses = examples["pose"]
+        # pointclouds = examples["pointcloud"]
+        # sample_indices = examples["index"]
+        # sample_object_indices = examples["object_index"]
+        # bbox = examples["bbox"]
+        # onehot = examples["category_onehot"]
+        # clutser_ids = examples["cluster"]
+
+        # # set corresponding object code & grasping pose for evaluation
+        # grasps = examples["grasp"]
+        # codes = examples["code"]
+        # occupied_object_codes = self.occupied_object_codes.tolist()
+        # occupied_object_grasps = self.occupied_object_grasps.tolist()
+        # for i, env_id in enumerate(env_ids):
+        #     occupied_object_codes[env_id] = codes[i]
+        #     occupied_object_grasps[env_id] = grasps[i]
+        # self.occupied_object_codes = np.array(occupied_object_codes)
+        # self.occupied_object_grasps = np.array(occupied_object_grasps)
+        # self.occupied_object_cluster_ids[env_ids] = torch.from_numpy(clutser_ids).to(self.device).to(torch.long)
+
+        # joints, poses = joints.to(self.device), poses.to(self.device)
+        # if self.enable_full_pointcloud_observation:
+        #     self.pointclouds[env_ids] = pointclouds
+
+        object_indices = self.object_encodings[env_ids, occupied_object_relative_indices]
         examples = self.grasping_dataset.sample(object_indices)
-        joints = examples["joints"]
-        poses = examples["pose"]
+        
         pointclouds = examples["pointcloud"]
-        sample_indices = examples["index"]
-        sample_object_indices = examples["object_index"]
         bbox = examples["bbox"]
         onehot = examples["category_onehot"]
         clutser_ids = examples["cluster"]
-
-        # set corresponding object code & grasping pose for evaluation
-        grasps = examples["grasp"]
-        codes = examples["code"]
-        occupied_object_codes = self.occupied_object_codes.tolist()
-        occupied_object_grasps = self.occupied_object_grasps.tolist()
-        for i, env_id in enumerate(env_ids):
-            occupied_object_codes[env_id] = codes[i]
-            occupied_object_grasps[env_id] = grasps[i]
-        self.occupied_object_codes = np.array(occupied_object_codes)
-        self.occupied_object_grasps = np.array(occupied_object_grasps)
-        self.occupied_object_cluster_ids[env_ids] = torch.from_numpy(clutser_ids).to(self.device).to(torch.long)
-
-        joints, poses = joints.to(self.device), poses.to(self.device)
+        
         if self.enable_full_pointcloud_observation:
             self.pointclouds[env_ids] = pointclouds
+        
+        self.occupied_object_cluster_ids[env_ids] = torch.from_numpy(clutser_ids).to(self.device).to(torch.long)
 
         if torch.sum(self.done_successes) / self.num_envs > self.curriculum_thres:
             self.done_successes[:] = 0
@@ -3312,105 +3656,89 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
                 self.nominal_env_ratio = 0.2
                 self.curriculum_mode = "no"
 
+        # Comment out target hand pose setup since we don't need it for singulation
         # reset target object root state
         # target_occupied_object_init_root_position = position(
         #     self.gym_assets["target"]["objects"]["occupied_pose"], self.device
         # )
-        if self.render_target:
-            self.scene_target_object_root_positions[env_ids] = self.target_unused_object_init_root_positions
-            self.scene_target_object_root_orientations[env_ids, :, :] = 0.0
-            self.scene_target_object_root_orientations[env_ids, :, -1] = 1.0
 
-        # reset target shadow-hand dof positions & velocities
+        # reset target allegro-hand dof positions & velocities
 
         # do not set wrist angle for target!!!
-        if self.render_target:
-            ii, jj = torch.meshgrid(env_ids, self.grasping_joint_indices[2:], indexing="ij")
-            self.target_shadow_hand_dof_positions[ii, jj] = joints[:, 2:]
-            self.target_shadow_hand_dof_velocities[env_ids, :] = 0.0
-
-            self.prev_target_targets[ii, jj] = joints[:, 2:]
-            self.curr_target_targets[ii, jj] = joints[:, 2:]
         # do not use current hand pose for compute target!!!
-        shadow_hand_root_position = self._target_hand_palm_pose[:3].reshape(-1, 3).repeat(num_reset_envs, 1)
-        shadow_hand_root_orientation = self._target_hand_palm_pose[3:7].reshape(-1, 4).repeat(num_reset_envs, 1)
+        # allegro_hand_root_position = self._target_hand_palm_pose[:3].reshape(-1, 3).repeat(num_reset_envs, 1)
+        # allegro_hand_root_orientation = self._target_hand_palm_pose[3:7].reshape(-1, 4).repeat(num_reset_envs, 1)
 
-        object_positions_wrt_palm = poses[:, 0:3]
-        object_orientations_wrt_palm = poses[:, 3:7]
+        # object_positions_wrt_palm = poses[:, 0:3]
+        # object_orientations_wrt_palm = poses[:, 3:7]
 
-        palm_orientations_wrt_object, palm_positions_wrt_object = transformation_inverse(
-            object_orientations_wrt_palm, object_positions_wrt_palm
-        )
+        # palm_orientations_wrt_object, palm_positions_wrt_object = transformation_inverse(
+        #     object_orientations_wrt_palm, object_positions_wrt_palm
+        # )
 
-        # TODO change to forearm pose
-        object_orientation, object_position = transformation_multiply(
-            shadow_hand_root_orientation,
-            shadow_hand_root_position,
-            object_orientations_wrt_palm,
-            object_positions_wrt_palm,
-        )
+        # # TODO change to forearm pose
+        # object_orientation, object_position = transformation_multiply(
+        #     allegro_hand_root_orientation,
+        #     allegro_hand_root_position,
+        #     object_orientations_wrt_palm,
+        #     object_positions_wrt_palm,
+        # )
 
-        ii, jj = torch.meshgrid(env_ids, self.grasping_joint_indices[2:], indexing="ij")
-        self._r_target_object_positions_wrt_palm[env_ids] = poses[:, 0:3]
-        self._r_target_object_orientations_wrt_palm[env_ids] = poses[:, 3:7]
-        self._r_target_shadow_dof_positions[ii, jj] = joints[:, 2:]
-        self._r_target_object_root_orientations[env_ids] = object_orientation
-        self._r_target_object_root_positions[env_ids] = object_position
-        self._r_target_palm_positions_wrt_object[env_ids] = palm_positions_wrt_object
-        self._r_target_palm_orientations_wrt_object[env_ids] = palm_orientations_wrt_object
+        # ii, jj = torch.meshgrid(env_ids, self.grasping_joint_indices[2:], indexing="ij")
+        # self._r_target_object_positions_wrt_palm[env_ids] = poses[:, 0:3]
+        # self._r_target_object_orientations_wrt_palm[env_ids] = poses[:, 3:7]
+        # self._r_target_allegro_dof_positions[ii, jj] = joints[:, 2:]
+        # self._r_target_object_root_orientations[env_ids] = object_orientation
+        # self._r_target_object_root_positions[env_ids] = object_position
+        # self._r_target_palm_positions_wrt_object[env_ids] = palm_positions_wrt_object
+        # self._r_target_palm_orientations_wrt_object[env_ids] = palm_orientations_wrt_object
 
-        ii, jj = torch.meshgrid(env_ids, self.shadow_digits_actuated_dof_indices - 6, indexing="ij")
-        self._r_target_shadow_digits_actuated_dof_positions[env_ids] = self._r_target_shadow_dof_positions[
-            ii, jj
-        ].clone()
+        # ii, jj = torch.meshgrid(env_ids, self.allegro_digits_actuated_dof_indices - 6, indexing="ij")
+        # self._r_target_allegro_digits_actuated_dof_positions[env_ids] = self._r_target_allegro_dof_positions[
+        #     ii, jj
+        # ].clone()
 
-        ii, jj = torch.meshgrid(env_ids, self.shadow_fingers_actuated_dof_indices - 6, indexing="ij")
-        self._r_target_shadow_fingers_actuated_dof_positions[env_ids] = self._r_target_shadow_dof_positions[
-            ii, jj
-        ].clone()
+        # ii, jj = torch.meshgrid(env_ids, self.allegro_fingers_actuated_dof_indices - 6, indexing="ij")
+        # self._r_target_allegro_fingers_actuated_dof_positions[env_ids] = self._r_target_allegro_dof_positions[
+        #     ii, jj
+        # ].clone()
 
-        ii, jj = torch.meshgrid(env_ids, self.shadow_thumb_actuated_dof_indices - 6, indexing="ij")
-        self._r_target_shadow_thumb_actuated_dof_positions[env_ids] = self._r_target_shadow_dof_positions[
-            ii, jj
-        ].clone()
+        # ii, jj = torch.meshgrid(env_ids, self.allegro_thumb_actuated_dof_indices - 6, indexing="ij")
+        # self._r_target_allegro_thumb_actuated_dof_positions[env_ids] = self._r_target_allegro_dof_positions[
+        #     ii, jj
+        # ].clone()
 
-        # print(self._r_target_shadow_dof_positions.shape, self.target_shadow_hand_dof_positions.shape)
+        # print(self._r_target_allegro_dof_positions.shape, self.target_allegro_hand_dof_positions.shape)
 
-        if self.env_mode == "orn":
-            self.object_targets[env_ids] = object_orientation.clone()
-        elif self.env_mode == "relpose":
-            self.object_targets[env_ids] = poses.clone()
-        elif self.env_mode == "relposecontact" or self.env_mode == "pgm":
-            self.object_targets[env_ids, :7] = poses.clone()
-            self.object_targets[env_ids, 7:25] = self._r_target_shadow_digits_actuated_dof_positions[env_ids]
+        # Comment out target setting since we don't need it for singulation
+        # if self.env_mode == "orn":
+        #     self.object_targets[env_ids] = object_orientation.clone()
+        # elif self.env_mode == "relpose":
+        #     self.object_targets[env_ids] = poses.clone()
+        # elif self.env_mode == "relposecontact" or self.env_mode == "pgm":
+        #     self.object_targets[env_ids, :7] = poses.clone()
+        #     self.object_targets[env_ids, 7:25] = self._r_target_allegro_digits_actuated_dof_positions[env_ids]
 
-        if self.render_target:
-            self.root_positions[self.target_occupied_object_indices[env_ids], :] = object_position
-            self.root_orientations[self.target_occupied_object_indices[env_ids], :] = object_orientation
-            if self.save_video:
-                self.root_positions[self.target_occupied_object_indices[env_ids], 0] += video_pose[0]
-                self.root_positions[self.target_occupied_object_indices[env_ids], 1] += video_pose[1]
-                self.root_positions[self.target_occupied_object_indices[env_ids], 2] += video_pose[2]
 
         # TODO: add noise to the initial DOF positions
         dof_init_positions = self.gym_assets["current"]["robot"]["init"]["position"]
         dof_init_velocities = self.gym_assets["current"]["robot"]["init"]["velocity"]
-        self.shadow_hand_dof_positions[env_ids, :] = dof_init_positions
-        self.shadow_hand_dof_velocities[env_ids, :] = dof_init_velocities
+        self.allegro_hand_dof_positions[env_ids, :] = dof_init_positions
+        self.allegro_hand_dof_velocities[env_ids, :] = dof_init_velocities
 
         self.prev_targets[env_ids] = dof_init_positions
         self.curr_targets[env_ids] = dof_init_positions
 
         # random object orientation
-        if self.reset_obj_ori_noise > 0:
-            occupied_object_init_root_orientation = random_orientation_within_angle(
-                num_reset_envs, self.device, object_orientation, self.reset_obj_ori_noise / (180 / torch.pi)
-            )
-        else:
-            occupied_object_init_root_orientation = random_orientation(num_reset_envs, self.device)
-
-        nominal_mask = torch.rand(num_reset_envs, device=self.device) < self.nominal_env_ratio
-        occupied_object_init_root_orientation[nominal_mask] = self._object_nominal_orientation.clone()
+        # if self.reset_obj_ori_noise > 0:
+        #     occupied_object_init_root_orientation = random_orientation_within_angle(
+        #         num_reset_envs, self.device, object_orientation, self.reset_obj_ori_noise / (180 / torch.pi)
+        #     )
+        # else:
+        #     occupied_object_init_root_orientation = random_orientation(num_reset_envs, self.device)
+        
+        # For singulation task, use nominal orientation (no rotation) for all boxes
+        occupied_object_init_root_orientation = torch.tensor(self._object_nominal_orientation, device=self.device).repeat(num_reset_envs, 1)
 
         # Compute statastics of object pointclouds
         pointclouds_wrt_world = quat_rotate(occupied_object_init_root_orientation[:, None, :], pointclouds)
@@ -3424,19 +3752,26 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         self.object_bboxes[env_ids] = bbox.clone()
         self.object_categories[env_ids] = onehot.clone()
 
-        # Inject noise to object position
-        _bound_x: torch.Tensor = self._table_x_length / 2 - obj_max_length
-        occupied_object_init_x = torch_rand_minmax(-_bound_x, _bound_x, num_reset_envs, device=self.device)
-        _bound_y: torch.Tensor = self._table_y_length / 2 - obj_max_length
-        occupied_object_init_y = torch_rand_minmax(-_bound_y, _bound_y, num_reset_envs, device=self.device)
-        occupied_object_init_z = self._object_z - obj_min_z
-        occupied_object_init_root_position = (
-            torch.stack([occupied_object_init_x, occupied_object_init_y, occupied_object_init_z], dim=1)
-            + self._table_pose_tensor
-        )
+        # For singulation task, don't randomize object positions
+        # Keep boxes in their original grid positions to maintain ordered layout
+        # Use the original poses from the box grid generation
+        occupied_object_init_root_position = torch.zeros(num_reset_envs, 3, device=self.device)
+        for i, env_id in enumerate(env_ids):
+            # Get the original pose of the occupied object from the box grid
+            occupied_idx = occupied_object_relative_indices[i]
+            # Use the original grid pose for the occupied object
+            original_pose = self.gym_assets["current"]["objects"]["poses"][occupied_idx]
+            occupied_object_init_root_position[i] = torch.tensor([original_pose.p.x, original_pose.p.y, original_pose.p.z], device=self.device)
 
-        # Set object root states
-        self.scene_object_root_positions[env_ids] = self.unused_object_init_root_positions
+        # Set object root states - place all boxes in their original grid positions
+        # Reset all boxes to their original grid positions for each environment
+        for i, env_id in enumerate(env_ids):
+            for j in range(self.num_objects_per_env):
+                original_pose = self.gym_assets["current"]["objects"]["poses"][j]
+                self.scene_object_root_positions[env_id, j] = torch.tensor([original_pose.p.x, original_pose.p.y, original_pose.p.z], device=self.device)
+                # Set orientation to no rotation
+                self.scene_object_root_orientations[env_id, j] = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
+        
         self.scene_object_root_linear_velocities[env_ids] = 0.0
         self.scene_object_root_angular_velocities[env_ids] = 0.0
 
@@ -3445,23 +3780,28 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         self.occupied_object_init_root_orientations[env_ids, :] = occupied_object_init_root_orientation.clone()
         self.root_positions[self.occupied_object_indices[env_ids], :] = occupied_object_init_root_position
         self.root_orientations[self.occupied_object_indices[env_ids], :] = occupied_object_init_root_orientation
+        
+        # Set all object positions and orientations in the root_states tensor
+        for i, env_id in enumerate(env_ids):
+            for j in range(self.num_objects_per_env):
+                object_idx = self.object_indices[env_id, j]
+                self.root_positions[object_idx, :] = self.scene_object_root_positions[env_id, j]
+                self.root_orientations[object_idx, :] = self.scene_object_root_orientations[env_id, j]
 
         self.robot_init_dof[env_ids, :] = dof_init_positions.clone()
 
         # Set CASE2023 baseline related tensors
-        if self.method == "case":
-            self.prev_object_positions_wrt_palm[env_ids] = occupied_object_init_root_position
-            self.prev_object_orientations_wrt_palm[env_ids] = occupied_object_init_root_orientation
-            self.prev_norm_object_orientation_wrt_palm[env_ids] = torch.nan
-            self.prev_dof_positions[env_ids] = dof_init_positions[self.shadow_digits_actuated_dof_indices]
-            self.prev_kpoint_distances[env_ids] = torch.nan
-            self.occupied_mesh_indices[env_ids] = sample_object_indices
+        # Comment out since we don't need target poses for singulation
+        # if self.method == "case":
+        #     self.prev_object_positions_wrt_palm[env_ids] = occupied_object_init_root_position
+        #     self.prev_object_orientations_wrt_palm[env_ids] = occupied_object_init_root_orientation
+        #     self.prev_norm_object_orientation_wrt_palm[env_ids] = torch.nan
+        #     self.prev_dof_positions[env_ids] = dof_init_positions[self.allegro_digits_actuated_dof_indices]
+        #     self.prev_kpoint_distances[env_ids] = torch.nan
+        #     self.occupied_mesh_indices[env_ids] = sample_object_indices
 
         # Set dof-position-targets & dof-states
-        if self.render_target:
-            indices = torch.cat([self.shadow_hand_indices[env_ids], self.target_shadow_hand_indices[env_ids]])
-        else:
-            indices = self.shadow_hand_indices[env_ids]
+        indices = self.allegro_hand_indices[env_ids]
         indices = indices.flatten().to(torch.int32)
 
         self.gym.set_dof_position_target_tensor_indexed(
@@ -3478,10 +3818,7 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         )
 
         # Set actor-root-states
-        if self.render_target:
-            indices = torch.cat([self.object_indices[env_ids], self.target_object_indices[env_ids]])
-        else:
-            indices = self.object_indices[env_ids]
+        indices = self.object_indices[env_ids]
         indices = indices.flatten().to(torch.int32)
 
         self.gym.set_actor_root_state_tensor_indexed(
@@ -3550,8 +3887,8 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
             # these are used for reward computation
             self._r_target_object_positions_wrt_palm[env_ids] = object_targets[:, :3]
             self._r_target_object_orientations_wrt_palm[env_ids] = object_targets[:, 3:7]
-            ii, jj = torch.meshgrid(env_ids, self.shadow_digits_actuated_dof_indices - 6, indexing="ij")
-            self._r_target_shadow_dof_positions[ii, jj] = object_targets[:, 7:25]
+            ii, jj = torch.meshgrid(env_ids, self.allegro_digits_actuated_dof_indices - 6, indexing="ij")
+            self._r_target_allegro_dof_positions[ii, jj] = object_targets[:, 7:25]
 
             self.occupied_object_init_root_positions[env_ids, :] = obj_pos
             self.occupied_object_init_root_orientations[env_ids, :] = obj_orn
@@ -3586,12 +3923,12 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
             arm_target_dof = targets[:, self.ur_actuated_dof_indices] + delta_joint_move
 
             current_dof = targets.clone()
-            current_dof[:, self.shadow_actuated_dof_indices] = hand_target_dof
-            current_dof[:, self.shadow_tendon_dof_indices] = saturate(
-                current_dof[:, self.shadow_coupled_dof_indices]
-                - self.gym_assets["current"]["robot"]["limits"]["upper"][self.shadow_coupled_dof_indices],
-                self.gym_assets["current"]["robot"]["limits"]["lower"][self.shadow_tendon_dof_indices],
-                self.gym_assets["current"]["robot"]["limits"]["upper"][self.shadow_tendon_dof_indices],
+            current_dof[:, self.allegro_actuated_dof_indices] = hand_target_dof
+            current_dof[:, self.allegro_tendon_dof_indices] = saturate(
+                current_dof[:, self.allegro_coupled_dof_indices]
+                - self.gym_assets["current"]["robot"]["limits"]["upper"][self.allegro_coupled_dof_indices],
+                self.gym_assets["current"]["robot"]["limits"]["lower"][self.allegro_tendon_dof_indices],
+                self.gym_assets["current"]["robot"]["limits"]["upper"][self.allegro_tendon_dof_indices],
             )
             robot_dof = current_dof.clone()
             robot_dof[:, self.ur_actuated_dof_indices] = arm_target_dof
@@ -3610,11 +3947,11 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
             )
 
         if set_dof_state:
-            self.shadow_hand_dof_positions[env_ids, :] = robot_dof
+            self.allegro_hand_dof_positions[env_ids, :] = robot_dof
         self.prev_targets[env_ids] = robot_dof
         self.curr_targets[env_ids] = robot_dof
 
-        indices = torch.unique((self.shadow_hand_indices[env_ids]).flatten().to(torch.int32))
+        indices = torch.unique((self.allegro_hand_indices[env_ids]).flatten().to(torch.int32))
         self.gym.set_dof_position_target_tensor_indexed(
             self.sim,
             gymtorch.unwrap_tensor(self.curr_targets_buffer),
@@ -3653,7 +3990,7 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
             self.prev_targets[:] = self.curr_targets[:]
 
             indices = torch.unique(
-                torch.cat([self.shadow_hand_indices, self.target_shadow_hand_indices]).flatten().to(torch.int32)
+                torch.cat([self.allegro_hand_indices, self.target_allegro_hand_indices]).flatten().to(torch.int32)
             )
 
             self.gym.set_dof_position_target_tensor_indexed(
@@ -3712,60 +4049,58 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         self.prev_endeffector_positions = self.endeffector_positions.clone()
         self.prev_endeffector_orientations = self.endeffector_orientations.clone()
         self.prev_endeffector_orientations_euler = torch.stack(get_euler_xyz(self.prev_endeffector_orientations), dim=1)
-        self.prev_shadow_actuated_dof_positions = self.shadow_hand_dof_positions[
-            :, self.shadow_actuated_dof_indices
+        self.prev_allegro_actuated_dof_positions = self.allegro_hand_dof_positions[
+            :, self.allegro_actuated_dof_indices
         ].clone()
         self._refresh_action_tensors(self.actions)
 
         if self.use_relative_control:
             targets = self.prev_targets.clone()
             if self.ur_control_type == "osc":
-                ur_dof_movements, self.target_eef_pos, self.target_eef_euler = compute_relative_ur10e_dof_positions(
+                xarm_dof_movements, self.target_eef_pos, self.target_eef_euler = compute_relative_xarm_dof_positions(
                     self.endeffector_positions,
                     self.endeffector_orientations,
                     self.j_eef,
                     self.eef_translation,
                     self.eef_rotation,
-                    self._max_ur_endeffector_pos_vel,
-                    self._max_ur_endeffector_rot_vel,
+                    self._max_xarm_endeffector_pos_vel,
+                    self._max_xarm_endeffector_rot_vel,
                     self.dt,
                 )
             else:
-                ur_dof_speeds = torch.cat([self.eef_translation, self.eef_rotation], dim=1)
-                ur_dof_movements = ur_dof_speeds * self.dof_speed_scale * self.dt
+                xarm_dof_speeds = torch.cat([self.eef_translation, self.eef_rotation], dim=1)
+                xarm_dof_movements = xarm_dof_speeds * self.dof_speed_scale * self.dt
 
             if getattr(self, "eef_translation", None) is None and getattr(self, "eef_rotation", None) is None:
-                ur_dof_movements[:] = 0
+                xarm_dof_movements[:] = 0
 
-            self.curr_targets[:, self.ur_actuated_dof_indices] = (
-                targets[:, self.ur_actuated_dof_indices] + ur_dof_movements
+            self.curr_targets[:, self.xarm_actuated_dof_indices] = (
+                      targets[:, self.xarm_actuated_dof_indices] + xarm_dof_movements
             )
 
-            if getattr(self, "shadow_dof_speeds", None) is not None:
-                if wrist_zero_action:
-                    self.actions[:, :2] = 0
+            if getattr(self, "allegro_dof_speeds", None) is not None:
                 # hand moving
-                targets[:, self.shadow_coupled_dof_indices] = (
-                    targets[:, self.shadow_coupled_dof_indices] + targets[:, self.shadow_tendon_dof_indices]
+                # targets[:, self.allegro_coupled_dof_indices] = (
+                #     targets[:, self.allegro_coupled_dof_indices] + targets[:, self.allegro_tendon_dof_indices]
+                # )
+                self.curr_targets[:, self.allegro_actuated_dof_indices] = (
+                    targets[:, self.allegro_actuated_dof_indices]
+                    + self.allegro_dof_speeds * self.dof_speed_scale * self.dt
                 )
-                self.curr_targets[:, self.shadow_actuated_dof_indices] = (
-                    targets[:, self.shadow_actuated_dof_indices]
-                    + self.shadow_dof_speeds * self.dof_speed_scale * self.dt
-                )
-                self.curr_targets[:, self.shadow_tendon_dof_indices] = saturate(
-                    self.curr_targets[:, self.shadow_coupled_dof_indices]
-                    - self.gym_assets["current"]["robot"]["limits"]["upper"][self.shadow_coupled_dof_indices],
-                    self.gym_assets["current"]["robot"]["limits"]["lower"][self.shadow_tendon_dof_indices],
-                    self.gym_assets["current"]["robot"]["limits"]["upper"][self.shadow_tendon_dof_indices],
-                )
+                # self.curr_targets[:, self.allegro_tendon_dof_indices] = saturate(
+                #     self.curr_targets[:, self.allegro_coupled_dof_indices]
+                #     - self.gym_assets["current"]["robot"]["limits"]["upper"][self.allegro_coupled_dof_indices],
+                #     self.gym_assets["current"]["robot"]["limits"]["lower"][self.allegro_tendon_dof_indices],
+                #     self.gym_assets["current"]["robot"]["limits"]["upper"][self.allegro_tendon_dof_indices],
+                # )
         else:
             # simulate the tendon coupling
             self.curr_targets[:, self.actuated_dof_indices] = self.actions
-            self.curr_targets[:, self.shadow_tendon_dof_indices] = (
-                torch.clamp_min(self.curr_targets[:, self.shadow_coupled_dof_indices], 0.0) * 2.0 - 1.0
+            self.curr_targets[:, self.allegro_tendon_dof_indices] = (
+                torch.clamp_min(self.curr_targets[:, self.allegro_coupled_dof_indices], 0.0) * 2.0 - 1.0
             )
-            self.curr_targets[:, self.shadow_coupled_dof_indices] = (
-                torch.clamp_max(self.curr_targets[:, self.shadow_coupled_dof_indices], 0.0) * 2.0 + 1.0
+            self.curr_targets[:, self.allegro_coupled_dof_indices] = (
+                torch.clamp_max(self.curr_targets[:, self.allegro_coupled_dof_indices], 0.0) * 2.0 + 1.0
             )
             # denormalize & saturate the targets
             self.curr_targets[:] = denormalize(
@@ -3788,10 +4123,7 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
             self.curr_targets[:, 6:] = self.gym_assets["current"]["robot"]["limits"]["lower"][6:]
         self.prev_targets[:] = self.curr_targets[:]
 
-        if self.render_target:
-            indices = torch.cat([self.shadow_hand_indices, self.target_shadow_hand_indices])
-        else:
-            indices = self.shadow_hand_indices
+        indices = self.allegro_hand_indices
         indices = indices.flatten().to(torch.int32)
         self.gym.set_dof_position_target_tensor_indexed(
             self.sim,
@@ -3800,12 +4132,12 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
             indices.shape[0],
         )
 
-        # self.target_shadow_hand_dof_positions[:] = self.curr_target_targets[:]
-        # self.target_shadow_hand_dof_velocities[:] = 0.0
+        # self.target_allegro_hand_dof_positions[:] = self.curr_target_targets[:]
+        # self.target_allegro_hand_dof_velocities[:] = 0.0
         # self.gym.set_dof_state_tensor_indexed(
         #     self.sim,
         #     gymtorch.unwrap_tensor(self.dof_states),
-        #     gymtorch.unwrap_tensor(self.target_shadow_hand_indices.to(torch.int32)),
+        #     gymtorch.unwrap_tensor(self.target_allegro_hand_indices.to(torch.int32)),
         #     self.num_envs,
         # )
 
@@ -3821,11 +4153,12 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
             self.compute_reward(self.actions)
 
         # track gpu memory usage
-        gpu_mem_free, gpu_mem_total = torch.cuda.mem_get_info(device=self.device)
-        gpu_mem_occupied = torch.tensor([gpu_mem_total - gpu_mem_free], device=self.device)
-        self.extras["gpu_mem_occupied_MB"] = gpu_mem_occupied / 1024 / 1024
-        self.extras["gpu_mem_occupied_GB"] = gpu_mem_occupied / 1024 / 1024 / 1024
-        self.extras["gpu_mem_occupied_ratio"] = gpu_mem_occupied / gpu_mem_total
+        if self.device.startswith("cuda"):   
+            gpu_mem_free, gpu_mem_total = torch.cuda.mem_get_info(device=self.device)
+            gpu_mem_occupied = torch.tensor([gpu_mem_total - gpu_mem_free], device=self.device)
+            self.extras["gpu_mem_occupied_MB"] = gpu_mem_occupied / 1024 / 1024
+            self.extras["gpu_mem_occupied_GB"] = gpu_mem_occupied / 1024 / 1024 / 1024
+            self.extras["gpu_mem_occupied_ratio"] = gpu_mem_occupied / gpu_mem_total
 
         self.extras["max_jacobian_det"] = torch.max(torch.det(self.j_eef).abs()).reshape(1)
 
@@ -3837,16 +4170,6 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
             origin_orientations[:, 3] = 1
             draw_axes(self.gym, self.viewer, self.envs, origin_positions, origin_orientations, 0.5)
             draw_axes(self.gym, self.viewer, self.envs, self.object_root_positions, self.object_root_orientations, 0.1)
-
-            if self.render_target:
-                draw_axes(
-                    self.gym,
-                    self.viewer,
-                    self.envs,
-                    self.target_object_root_positions,
-                    self.target_object_root_orientations,
-                    0.1,
-                )
 
             if self.enable_rendered_pointcloud_observation:
                 self.draw_camera_axes()
@@ -3873,9 +4196,9 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
         # if close_dof_indices is None:
         #     close_dof_indices = self.close_dof_indices.clone()
 
-        # self.curr_targets[env_ids, :] = self.shadow_hand_dof_positions.clone()
+        # self.curr_targets[env_ids, :] = self.allegro_hand_dof_positions.clone()
         # self.close(env_ids, close_dis, close_dof_indices)
-        # self.curr_targets[env_ids, :] = self.shadow_hand_dof_positions.clone()
+        # self.curr_targets[env_ids, :] = self.allegro_hand_dof_positions.clone()
         # self.reset_obj_vel(env_ids)
 
         current_pos = self.endeffector_positions.clone()
@@ -3892,11 +4215,11 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
             )
             delta_joint_move = delta_joint_move * self.dof_speed_scale * self.dt
 
-            targets = self.shadow_hand_dof_positions.clone()
+            targets = self.allegro_hand_dof_positions.clone()
             ii, jj = torch.meshgrid(env_ids, self.ur_actuated_dof_indices, indexing="ij")
             self.curr_targets[ii, jj] = targets[ii, jj] + delta_joint_move
             # apply_forces = torch.zeros((self.num_envs, self.num_bodies, 3), device=self.device, dtype=torch.float)
-            # apply_forces[env_ids, self.shadow_center_index, 2] = 10
+            # apply_forces[env_ids, self.allegro_center_index, 2] = 10
             # self.gym.apply_rigid_body_force_tensors(
             #     self.sim, gymtorch.unwrap_tensor(apply_forces), None, gymapi.ENV_SPACE
             # )
@@ -3905,7 +4228,7 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
             # self.curr_targets[ii, jj] += 0.02
 
             indices = torch.unique(
-                torch.cat([self.shadow_hand_indices, self.target_shadow_hand_indices]).flatten().to(torch.int32)
+                torch.cat([self.allegro_hand_indices, self.target_allegro_hand_indices]).flatten().to(torch.int32)
             )
             self.gym.set_dof_position_target_tensor_indexed(
                 self.sim,
@@ -3923,8 +4246,8 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
 
             print(
                 F.pairwise_distance(
-                    self.shadow_hand_dof_positions[0, 6:],
-                    self.curr_targets_buffer[0, self.shadow_hand_dof_start : self.shadow_hand_dof_end][6:],
+                    self.allegro_hand_dof_positions[0, 6:],
+                    self.curr_targets_buffer[0, self.allegro_hand_dof_start : self.allegro_hand_dof_end][6:],
                 )
             )
         print("lifted")
@@ -3934,11 +4257,11 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
     def close(self, env_ids, close_dis=0.3, close_dof_indices=None, check_contact=False):
         for i in range(50):
             if i < 30:
-                targets = self.shadow_hand_dof_positions.clone()
+                targets = self.allegro_hand_dof_positions.clone()
                 ii, jj = torch.meshgrid(env_ids, close_dof_indices, indexing="ij")
                 self.curr_targets[ii, jj] = targets[ii, jj] + close_dis / 30
                 indices = torch.unique(
-                    torch.cat([self.shadow_hand_indices, self.target_shadow_hand_indices]).flatten().to(torch.int32)
+                    torch.cat([self.allegro_hand_indices, self.target_allegro_hand_indices]).flatten().to(torch.int32)
                 )
                 self.gym.set_dof_position_target_tensor_indexed(
                     self.sim,
@@ -3952,8 +4275,8 @@ class ShadowHandFunctionalManipulationUnderarm(VecTask):
             self._refresh_sim_tensors()
 
     def draw_force_sensor_axes(self) -> None:
-        positions: torch.Tensor = self.shadow_hand_rigid_body_positions[:, self.force_sensor_rigid_body_indices]
-        orientations: torch.Tensor = self.shadow_hand_rigid_body_orientations[:, self.force_sensor_rigid_body_indices]
+        positions: torch.Tensor = self.allegro_hand_rigid_body_positions[:, self.force_sensor_rigid_body_indices]
+        orientations: torch.Tensor = self.allegro_hand_rigid_body_orientations[:, self.force_sensor_rigid_body_indices]
         draw_boxes(self.gym, self.viewer, self.envs, positions, orientations, 0.001)
 
     def draw_camera_axes(self) -> None:
@@ -4137,7 +4460,7 @@ def pointcloud_from_depth(
     return points, mask
 
 
-def compute_relative_ur10e_dof_positions(
+def compute_relative_xarm_dof_positions(
     current_eef_positions: torch.Tensor,
     current_eef_orientations: torch.Tensor,
     eef_jacobian: torch.Tensor,
@@ -4147,7 +4470,7 @@ def compute_relative_ur10e_dof_positions(
     max_eef_rotation_speed: float,
     dt: float,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Compute relative UR10e dof positions.
+    """Compute relative xarm dof positions.
 
     Args:
         current_eef_positions (torch.Tensor): Current end effector positions, shape (N, 3).
@@ -4161,7 +4484,7 @@ def compute_relative_ur10e_dof_positions(
 
     Returns:
         Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            - relative_ur10e_dof_positions (torch.Tensor): Relative UR10e dof positions, shape (N, 6).
+            - relative_xarm_dof_positions (torch.Tensor): Relative xarm dof positions, shape (N, 6).
             - target_eef_positions (torch.Tensor): Target end effector positions, shape (N, 3).
             - target_eef_euler (torch.Tensor): Target end effector euler angles, shape (N, 3).
     """

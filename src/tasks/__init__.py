@@ -7,12 +7,12 @@ from isaacgymenvs.tasks.base.vec_task import VecTask
 from isaacgymenvs.utils.reformat import omegaconf_to_dict
 from omegaconf import DictConfig, OmegaConf
 
-# from .functional_manipulation import ShadowHandFunctionalManipulation
 from .functional_manipulation_underarm import ShadowHandFunctionalManipulationUnderarm
-# from .shadow_hand import ShadowHand
+from .singulation_grasp import XArmAllegroHandFunctionalManipulationUnderarm
 
 # isaacgym_task_map["ShadowHandFunctionalManipulation"] = ShadowHandFunctionalManipulation
 isaacgym_task_map["ShadowHandFunctionalManipulationUnderarm"] = ShadowHandFunctionalManipulationUnderarm
+isaacgym_task_map["XArmAllegroHandFunctionalManipulationUnderarm"] = XArmAllegroHandFunctionalManipulationUnderarm
 # isaacgym_task_map["ShadowHand"] = ShadowHand
 
 
