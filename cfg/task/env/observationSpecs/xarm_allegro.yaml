@@ -159,7 +159,7 @@ object_bbox:
   attr: object_bboxes_wrt_world
 
 ##################################################
-# Target 
+# Target
 ##################################################
 
 # object_target_orn:
@@ -175,7 +175,7 @@ object_bbox:
 #   attr: orientation_error
 
 # position_error:
-#   shape: 3  
+#   shape: 3
 #   attr: position_error
 
 # fingerjoint_error:
@@ -212,4 +212,4 @@ tactile:
 
 action:
   shape: num_actions
-  attr: actions 
+  attr: actions

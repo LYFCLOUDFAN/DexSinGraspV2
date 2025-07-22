@@ -27,6 +27,8 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from algorithms.ppo.storage import RolloutStorage
+from algorithms.ppo.utils import AverageScalarMeter, RunningMeanStd
+
 # from algorithms.SDE import init_sde
 # from networks.SDENets_update import CondScoreModel
 from tasks.torch_utils import get_euler_xyz
@@ -37,8 +39,6 @@ save_video = False
 img_size = 256
 save_traj = False
 ana = False
-save_state = False
-save_metric = False
 obs_state_dim = 208
 plot_direction = False
 pcl_number = 512
@@ -98,6 +98,8 @@ class PPO:
         self.schedule = learn_cfg.get("schedule", "fixed")
         self.step_size = learn_cfg["optim_stepsize"]
         self.init_noise_std = learn_cfg.get("init_noise_std", 0.3)
+        self.normalize_input = learn_cfg["normalize_input"]
+        self.normalize_value = learn_cfg["normalize_value"]
         self.model_cfg = self.cfg_train["policy"]
         self.num_transitions_per_env = learn_cfg["nsteps"]
         self.learning_rate = learn_cfg["optim_stepsize"]
@@ -137,31 +139,6 @@ class PPO:
         hand_pcl = self.cfg_train["policy"]["hand_pcl"]
         hand_model = None
 
-        # obs_space = [
-        #     # "shadow_hand_position",
-        #     # "shadow_hand_orientation",
-        #     "ur_endeffector_position",
-        #     "ur_endeffector_orientation",
-        #     "shadow_hand_dof_position",
-        #     "shadow_hand_dof_velocity",
-        #     "fingertip_position_wrt_palm",
-        #     "fingertip_orientation_wrt_palm",
-        #     "fingertip_linear_velocity",
-        #     "fingertip_angular_velocity",
-        #     "object_position_wrt_palm",
-        #     "object_orientation_wrt_palm",
-        #     "object_position",
-        #     "object_orientation",
-        #     "object_linear_velocity",
-        #     "object_angular_velocity",
-        #     "object_target_relposecontact",
-        #     "position_error",
-        #     "orientation_error",
-        #     "fingerjoint_error",
-        #     "object_bbox",
-        #     # "object_category",
-        #     # "pointcloud_wrt_palm"
-        # ]
         # observation_metainfo = self.vec_env.export_observation_metainfo()
         # observation_metainfo = [obs for obs in observation_metainfo if obs['name'] in obs_space]
         # PPO components
@@ -222,6 +199,11 @@ class PPO:
             self.device,
             sampler,
         )
+
+        self.obs_running_mean_std = RunningMeanStd(observation_space_shape).to(
+            self.device
+        )
+        self.value_running_mean_std = RunningMeanStd((1,)).to(self.device)
 
         if self.args.exp_name == "ilad":
             for name, param in self.actor_critic.additional_critic_mlp1.named_parameters():
@@ -337,9 +319,6 @@ class PPO:
 
         if log_dir == "":
             pass
-            # self.log_dir = os.path.join(
-            #     f"./logs/{args.exp_name}/{time_now}_envnum:{self.vec_env.num_envs}_objnum:{self.vec_env.num_objects}_objnume:{self.vec_env.num_objects_per_env}_envmode:{self.vec_env.env_mode}_tranrewscale:{self.vec_env.tran_reward_scale}_seed{args.seed}"
-            # )
         else:
             self.log_dir = f"./logs/{args.exp_name}/{time_now}_{log_dir}_objtype:{object_type}_labeltype:{label_type}_objnum:{self.vec_env.num_objects}_objcat:{self.vec_env.object_cat}_maxpercat:{self.vec_env.max_per_cat}_geo:{self.vec_env.object_geo_level}_scale:{self.vec_env.object_scale}_envnum:{self.vec_env.num_envs}_rewtype:{self.vec_env.reward_type}_seed{args.seed}"
 
@@ -353,6 +332,9 @@ class PPO:
                 yaml.dump(cfg_train, f)
 
         self.print_log = print_log
+        if self.print_log:
+            self.episode_rewards = AverageScalarMeter(200)
+            self.episode_lengths = AverageScalarMeter(200)
 
         self.tot_timesteps = 0
         self.tot_time = 0
@@ -371,35 +353,6 @@ class PPO:
         if self.vec_env.mode == "eval":
             self.eval_round = self.args.eval_times
 
-        if save_metric:
-            if save_state:
-                self.eval_metrics = {
-                    "obj_shapes": self.vec_env.object_codes,
-                    "time_step": [],
-                    "success_rate": [],
-                    "gt_dist": [],
-                    "stability": [],
-                    "lift_nums": np.zeros(len(self.vec_env.object_codes)),
-                    "gf_state_init": [],
-                    "gf_state_final": [],
-                    "gf_state_gt": [],
-                }
-            else:
-                self.eval_metrics = {
-                    "obj_shapes": self.vec_env.object_codes,
-                    "time_step": [],
-                    "success_rate": [],
-                    "success_nums": np.zeros(len(self.vec_env.object_codes)),
-                    "num_trials": np.zeros(len(self.vec_env.object_codes)),
-                    "grasp": [],
-                    "num_trails_per_grasp": [],
-                    "num_success_per_grasp": [],
-                }
-
-            if self.vec_env.env_mode == "relpose":
-                self.eval_metrics["pos_dist"] = []
-                self.eval_metrics["rot_dist"] = []
-
         """ Demo """
         if self.args.collect_demo_num > 0:
             self.demo_dir = os.path.join(self.log_dir, "demo")
@@ -408,22 +361,49 @@ class PPO:
             self.total_demo_num = self.args.collect_demo_num * len(self.vec_env.object_codes)
             self.cur_demo_num = 0
 
-    def test(self, path):
-        self.actor_critic.load_state_dict(torch.load(path, map_location=self.device))
-        self.actor_critic.eval()
+    def restore_test(self, path):
+        checkpoint = torch.load(path)
+        self.actor_critic.load_state_dict(checkpoint["model"])
+        if self.normalize_input:
+            self.obs_running_mean_std.load_state_dict(
+                checkpoint["obs_running_mean_std"]
+            )
+        if self.normalize_value:
+            self.value_running_mean_std.load_state_dict(
+                checkpoint["value_running_mean_std"]
+            )
+        self.set_test()
 
-    def load(self, path):
-        self.actor_critic.load_state_dict(torch.load(path, map_location=self.device))
+    def restore_train(self, path):
+        if not path:
+            return
+        checkpoint = torch.load(path)
+        self.actor_critic.load_state_dict(checkpoint["model"])
         if self.args.con:
             self.current_learning_iteration = int(path.split("_")[-1].split(".")[0])
-        self.actor_critic.train()
+        if self.normalize_input:
+            self.obs_running_mean_std.load_state_dict(
+                checkpoint["obs_running_mean_std"]
+            )
+        self.set_train()
 
-        if save_metric:
-            model_dir = path[: -len(path.split("/")[-1])] + f"metric_{self.args.exp_name}_{self.args.seed}.pkl"
-            self.eval_metrics = CPickle.load(open(model_dir, "rb"))
+    def set_test(self, vis=False):
+        self.actor_critic.eval()
+        self.vec_env.eval(vis=vis)
+
+    def set_train(self):
+        self.actor_critic.train()
+        self.vec_env.train()
 
     def save(self, path):
-        torch.save(self.actor_critic.state_dict(), path)
+        weights = {
+            "model": self.actor_critic.state_dict(),
+        }
+        if self.normalize_input:
+            weights["obs_running_mean_std"] = self.obs_running_mean_std.state_dict()
+        if self.normalize_value:
+            weights["value_running_mean_std"] = self.value_running_mean_std.state_dict()
+        torch.save(weights, path)
 
     def get_action(self, current_obs, mode):
         # Compute the action
@@ -433,7 +413,7 @@ class PPO:
 
     def eval(self, it):
         # eval initilization
-        self.vec_env.eval(vis=save_video)
+        self.set_test(vis=save_video)
         test_times = 0
         success_rates = []  # s_rate for each round
         reward_all = []
@@ -697,17 +677,12 @@ class PPO:
                         contact_rew = 0
                         height_rew = 0
 
-                        if save_state:
-                            self.eval_metrics["gf_state_init"].append(self.vec_env.get_states(gf_state=True))
-                            self.eval_metrics["gf_state_gt"].append(self.vec_env.target_hand_dof)
-
                         # step
                         while True:
                             # Compute the action
                             actions, grad, _ = self.compute_action(current_obs=current_obs, mode="eval")
                             step_actions = self.process_actions(actions=actions.clone(), grad=grad.clone())
-                            if self.vec_env.progress_buf[0] == 49 and save_state:
-                                self.eval_metrics["gf_state_final"].append(self.vec_env.get_states(gf_state=True))
+
 
                             # Step the vec_environment
                             # print(step_actions)
@@ -779,57 +754,10 @@ class PPO:
                                     plt.plot(arm_diff_direction, label="arm_diff_direction")
                                     plt.plot(hand_diff_direction, label="hand_diff_direction")
 
-                                if save_metric:
-                                    self.eval_metrics["time_step"].append(it)
-                                    self.eval_metrics["success_rate"].append(
-                                        float((infos["success_num"] / self.vec_env.num_envs).cpu().numpy())
-                                    )
-                                    if self.vec_env.env_mode == "relpose":
-                                        self.eval_metrics["pos_dist"].append(torch.mean(pos_dist).item())
-                                        self.eval_metrics["rot_dist"].append(torch.mean(rot_dist).item())
-                                    for occupied_object_id, occupied_object_code in enumerate(
-                                        self.vec_env.occupied_object_codes
-                                    ):
-                                        obj_id_all = self.eval_metrics["obj_shapes"].index(occupied_object_code)
-                                        self.eval_metrics["success_nums"][obj_id_all] += self.vec_env.successes[
-                                            occupied_object_id
-                                        ]
-                                        self.eval_metrics["num_trials"][obj_id_all] += 1
-
-                                    for i, (code, grasp) in enumerate(
-                                        zip(self.vec_env.occupied_object_codes, self.vec_env.occupied_object_grasps)
-                                    ):
-                                        if (code, grasp) in self.eval_metrics["grasp"]:
-                                            idx = self.eval_metrics["grasp"].index((code, grasp))
-                                        else:
-                                            idx = len(self.eval_metrics["grasp"])
-                                            self.eval_metrics["grasp"].append((code, grasp))
-                                            self.eval_metrics["num_trails_per_grasp"].append(0)
-                                            self.eval_metrics["num_success_per_grasp"].append(0)
-                                        self.eval_metrics["num_trails_per_grasp"][idx] += 1
-                                        self.eval_metrics["num_success_per_grasp"][idx] += self.vec_env.successes[i]
-
-                                    # self.eval_metrics['stability'].append(float(infos['stability'].cpu().numpy()))
-                                    if self.vec_env.mode == "eval":
-                                        with open(
-                                            f"logs/{self.args.exp_name}/metrics_{self.args.eval_name}_eval_{self.args.seed}.pkl",
-                                            "wb",
-                                        ) as f:
-                                            pickle.dump(self.eval_metrics, f)
-                                    else:
-                                        with open(
-                                            os.path.join(
-                                                self.log_dir, f"metric_{self.args.exp_name}_{self.args.seed}.pkl"
-                                            ),
-                                            "wb",
-                                        ) as f:
-                                            pickle.dump(self.eval_metrics, f)
-
                                 break
                         pbar.update(1)
 
             assert test_times == self.eval_round * self.vec_env.num_envs
-            # plt.bar(range(len(self.eval_metrics["obj_shapes"])), self.eval_metrics["success_nums"])
             success_rates = torch.cat(success_rates)
             sr_mu, sr_std = success_rates.mean().cpu().numpy().item(), success_rates.std().cpu().numpy().item()
             print(f"|| num_envs: {self.vec_env.num_envs} || eval_times: {self.eval_round}")
@@ -841,106 +769,107 @@ class PPO:
             self.writer.add_scalar("Eval/success_rate", sr_mu, it)
             self.writer.add_scalar("Eval/eval_rews", eval_rews, it)
 
-    def run(self, num_learning_iterations, log_interval=1):
-        if self.is_testing:
-            self.eval(0)
-        else:
-            # train initilization
-            self.actor_critic.train()
-            self.vec_env.train()
-            rewbuffer = deque(maxlen=100)
-            lenbuffer = deque(maxlen=100)
-            cur_reward_sum = torch.zeros(self.vec_env.num_envs, dtype=torch.float, device=self.device)
-            cur_episode_length = torch.zeros(self.vec_env.num_envs, dtype=torch.float, device=self.device)
+    def train(self, num_learning_iterations, log_interval=1):
+        # rewbuffer = deque(maxlen=100)
+        # lenbuffer = deque(maxlen=100)
+        cur_reward_sum = torch.zeros((self.vec_env.num_envs, 1), dtype=torch.float, device=self.device)
+        cur_episode_length = torch.zeros(self.vec_env.num_envs, dtype=torch.float, device=self.device)
 
-            reward_sum = []
-            episode_length = []
+        # reward_sum = []
+        # episode_length = []
 
-            # reset env
-            current_obs = self.vec_env.reset()["obs"]
-            current_states = self.vec_env.get_state()
-            for it in range(self.current_learning_iteration, num_learning_iterations):
-                start = time.time()
-                ep_infos = []
-                # Rollout
-                for _ in range(self.num_transitions_per_env):
-                    if self.apply_reset:
-                        current_obs = self.vec_env.reset()["obs"]
-                        current_states = self.vec_env.get_state()
-
-                    # Compute the action
-                    actions, actions_log_prob, values, mu, sigma, grad, storage_obs = self.compute_action(
-                        current_obs=current_obs, current_states=current_states
-                    )
-                    step_actions = self.process_actions(actions=actions.clone(), grad=grad.clone())
-
-                    # Step the vec_environment
-                    if "gf" in self.vec_env.observation_info:
-                        self.vec_env.action_gf = grad.clone()
-                    next_obs, rews, dones, infos = self.vec_env.step(step_actions)
-                    next_states = self.vec_env.get_state()
-
-                    # Record the transition
-                    self.storage.add_transitions(
-                        storage_obs, current_states, actions, rews, dones, values, actions_log_prob, mu, sigma
-                    )
-                    current_obs.copy_(next_obs["obs"])
-                    current_states.copy_(next_states)
-
-                    # Book keeping
-                    ep_infos.append(infos.copy())
-                    # set_trace()
-
-                    if self.print_log:
-                        cur_reward_sum[:] += rews
-                        cur_episode_length[:] += 1
-
-                        new_ids = (dones > 0).nonzero(as_tuple=False)
-                        reward_sum.extend(cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
-                        episode_length.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
-                        cur_reward_sum[new_ids] = 0
-                        cur_episode_length[new_ids] = 0
-
-                    # done
-                    if torch.sum(dones) > 0:
-                        current_obs = self.vec_env.reset(dones)["obs"]
-                        current_states = self.vec_env.get_state()
-
-                if self.print_log:
-                    # reward_sum = [x[0] for x in reward_sum]
-                    # episode_length = [x[0] for x in episode_length]
-                    rewbuffer.extend(reward_sum)
-                    lenbuffer.extend(episode_length)
-
-                _, _, last_values, _, _, _, _ = self.compute_action(
-                    current_obs=current_obs, current_states=current_states, mode="train"
-                )
-                stop = time.time()
-                collection_time = stop - start
-                mean_trajectory_length, mean_reward = self.storage.get_statistics()
-
-                # Learning step
-                start = stop
-                self.storage.compute_returns(last_values, self.gamma, self.lam)
-                mean_value_loss, mean_surrogate_loss = self.update()
-                self.storage.clear()
-                stop = time.time()
-                learn_time = stop - start
-                if self.print_log:
-                    self.log(locals())
-                if (it + 1) % log_interval == 0:
-                    self.actor_critic.eval()
-                    self.eval(it + 1)
-                    self.actor_critic.train()
-                    self.vec_env.train()
-                    self.save(os.path.join(self.log_dir, "model_{}.pt".format(it + 1)))
-
+        # reset env
+        current_obs = self.vec_env.reset()["obs"]
+        current_states = self.vec_env.get_state()
+        for it in range(self.current_learning_iteration, num_learning_iterations):
+            start = time.time()
+            ep_infos = []
+            # Rollout
+            for _ in range(self.num_transitions_per_env):
+                if self.apply_reset:
                     current_obs = self.vec_env.reset()["obs"]
                     current_states = self.vec_env.get_state()
-                    cur_episode_length[:] = 0
-                    # TODO clean extras
-                ep_infos.clear()
-            self.save(os.path.join(self.log_dir, "model_{}.pt".format(num_learning_iterations)))
+
+                # Compute the action
+                actions, actions_log_prob, values, mu, sigma, grad, storage_obs = self.compute_action(
+                    current_obs=current_obs, current_states=current_states
+                )
+                step_actions = self.process_actions(actions=actions.clone(), grad=grad.clone())
+
+                # Step the vec_environment
+                if "gf" in self.vec_env.observation_info:
+                    self.vec_env.action_gf = grad.clone()
+                next_obs, rews, dones, infos = self.vec_env.step(step_actions)
+                next_states = self.vec_env.get_state()
+
+                rewards = rews.unsqueeze(-1)
+
+                # Record the transition
+                self.storage.add_transitions(
+                    storage_obs, current_states, actions, rews, dones, values, actions_log_prob, mu, sigma
+                )
+                current_obs.copy_(next_obs["obs"])
+                current_states.copy_(next_states)
+
+                # Book keeping
+                ep_infos.append(infos.copy())
+
+                if self.print_log:
+                    cur_reward_sum[:] += rewards
+                    cur_episode_length[:] += 1
+                    done_indices = (dones > 0).nonzero(as_tuple=False)
+                    not_dones = 1.0 - dones.float()
+
+                    # reward_sum.extend(cur_reward_sum[done_indices][:, 0].cpu().numpy().tolist())
+                    # episode_length.extend(cur_episode_length[done_indices][:, 0].cpu().numpy().tolist())
+                    self.episode_rewards.update(cur_reward_sum[done_indices])
+                    self.episode_lengths.update(cur_episode_length[done_indices])
+                    cur_reward_sum = cur_reward_sum * not_dones.unsqueeze(-1)
+                    cur_episode_length = cur_episode_length * not_dones
+
+                # done
+                if torch.sum(dones) > 0:
+                    current_obs = self.vec_env.reset(dones)["obs"]
+                    current_states = self.vec_env.get_state()
+
+            # if self.print_log:
+            #     rewbuffer.extend(reward_sum)
+            #     lenbuffer.extend(episode_length)
+
+            _, _, last_values, _, _, _, _ = self.compute_action(
+                current_obs=current_obs, current_states=current_states, mode="train"
+            )
+            stop = time.time()
+            collection_time = stop - start
+            mean_trajectory_length, mean_reward = self.storage.get_statistics()
+
+            # Learning step
+            start = stop
+            self.storage.compute_returns(last_values, self.gamma, self.lam)
+
+            if self.normalize_value:
+                self.value_running_mean_std.train()
+                all_values = self.storage.values.view(-1, 1)
+                _ = self.value_running_mean_std(all_values)
+
+            mean_value_loss, mean_surrogate_loss = self.update()
+            self.storage.clear()
+            stop = time.time()
+            learn_time = stop - start
+            if self.print_log:
+                self.log(locals())
+            if (it + 1) % log_interval == 0:
+                self.set_test()
+                self.eval(it + 1)
+                self.set_train()
+                self.save(os.path.join(self.log_dir, "model_{}.pt".format(it + 1)))
+
+                current_obs = self.vec_env.reset()["obs"]
+                current_states = self.vec_env.get_state()
+                cur_episode_length[:] = 0
+                # TODO clean extras
+            ep_infos.clear()
+        self.save(os.path.join(self.log_dir, "model_{}.pt".format(num_learning_iterations)))
 
     def log(self, locs, width=70, pad=35):
         self.tot_timesteps += self.num_transitions_per_env * self.vec_env.num_envs
@@ -965,11 +894,12 @@ class PPO:
         self.writer.add_scalar("Loss/value_function", locs["mean_value_loss"], locs["it"])
         self.writer.add_scalar("Loss/surrogate", locs["mean_surrogate_loss"], locs["it"])
         self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
-        if len(locs["rewbuffer"]) > 0:
-            self.writer.add_scalar("Train/mean_reward", statistics.mean(locs["rewbuffer"]), locs["it"])
-            self.writer.add_scalar("Train/mean_episode_length", statistics.mean(locs["lenbuffer"]), locs["it"])
-            self.writer.add_scalar("Train/mean_reward/time", statistics.mean(locs["rewbuffer"]), self.tot_time)
-            self.writer.add_scalar("Train/mean_episode_length/time", statistics.mean(locs["lenbuffer"]), self.tot_time)
+
+        if self.print_log:
+            self.writer.add_scalar("Train/mean_reward", self.episode_rewards.get_mean(), locs["it"])
+            self.writer.add_scalar("Train/mean_episode_length", self.episode_lengths.get_mean(), locs["it"])
+            self.writer.add_scalar("Train/mean_reward/time", self.episode_rewards.get_mean(), self.tot_time)
+            self.writer.add_scalar("Train/mean_episode_length/time",self.episode_lengths.get_mean(),self.tot_time,)
 
         self.writer.add_scalar("Train2/mean_reward/step", locs["mean_reward"], locs["it"])
         self.writer.add_scalar("Train2/mean_episode_length/episode", locs["mean_trajectory_length"], locs["it"])
@@ -978,7 +908,7 @@ class PPO:
 
         str = f" \033[1m Learning iteration {locs['it']}/{locs['num_learning_iterations']} \033[0m "
 
-        if len(locs["rewbuffer"]) > 0:
+        if self.print_log:
             log_string = (
                 f"""{'#' * width}\n"""
                 f"""{str.center(width, ' ')}\n\n"""
@@ -987,8 +917,8 @@ class PPO:
                 f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                 f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
                 f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
-                f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
-                f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n"""
+                f"""{'Mean reward:':>{pad}} {self.episode_rewards.get_mean():.2f}\n"""
+                f"""{'Mean episode length:':>{pad}} {self.episode_lengths.get_mean():.2f}\n"""
                 f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
                 f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n"""
             )
@@ -1055,9 +985,22 @@ class PPO:
                     # demo_actions_batch = self.demo_storage.actions.view(-1, self.demo_storage.size(-1))[indices]
                     # demo_advantages_batch = self.demo_storage.advantages.view(-1, 1)[indices]
                     # demo_old_actions_log_prob_batch = self.demo_storage.actions_log_prob.view(-1, 1)[indices]
-                actions_log_prob_batch, entropy_batch, value_batch, mu_batch, sigma_batch = self.actor_critic.evaluate(
-                    obs_batch, states_batch, actions_batch
-                )
+
+                if self.normalize_input:
+                    self.obs_running_mean_std.eval()
+                    obs_batch = self.obs_running_mean_std(obs_batch)
+
+                (
+                    actions_log_prob_batch,
+                    entropy_batch,
+                    value_batch,
+                    mu_batch,
+                    sigma_batch,
+                ) = self.actor_critic.evaluate(obs_batch, states_batch, actions_batch)
+
+                if self.normalize_value:
+                    self.value_running_mean_std.eval()
+                    value_batch = self.value_running_mean_std(value_batch)
 
                 if self.args.exp_name == "ilad":
                     """Evaulate demo."""
@@ -1291,19 +1234,31 @@ class PPO:
         else:
             grad = torch.tensor([], device=self.device)
 
+        if self.normalize_input:
+            if mode == "train":
+                self.obs_running_mean_std.train()
+                normalized_current_obs = self.obs_running_mean_std(current_obs)
+            else:
+                self.obs_running_mean_std.eval()
+                normalized_current_obs = self.obs_running_mean_std(current_obs)
+        else:
+            normalized_current_obs = current_obs
+
+        # pointnet fine-tuning
         if self.actor_critic.pcl_dim > 0 and self.pointnet_finetune:
-            batch_num = current_obs.size(0) // self.finetune_pointnet_bz + 1
-            for _ in range(batch_num):
-                current_obs_batch = current_obs[self.finetune_pointnet_bz * _ : self.finetune_pointnet_bz * (_ + 1), :]
-                # current_states_batch = current_states[:,self.finetune_pointnet_bz*batch_num+self.finetune_pointnet_bz*(batch_num+1)]
+            batch_num = normalized_current_obs.size(0) // self.finetune_pointnet_bz + 1
+            for batch_idx in range(batch_num):
+                obs_batch = normalized_current_obs[self.finetune_pointnet_bz * batch_idx : self.finetune_pointnet_bz * (batch_idx + 1)]
+
                 if mode == "train":
                     actions_batch, actions_log_prob_batch, values_batch, mu_batch, sigma_batch = self.actor_critic.act(
-                        current_obs_batch, current_states
+                        obs_batch, current_states
                     )
                 else:
-                    actions_batch = self.actor_critic.act_inference(current_obs_batch)
+                    actions_batch = self.actor_critic.act_inference(obs_batch)
 
-                if _ == 0:
+                # merge batch results
+                if batch_idx == 0:
                     if mode == "train":
                         actions, actions_log_prob, values, mu, sigma = (
                             actions_batch,
@@ -1325,11 +1280,12 @@ class PPO:
                         actions = torch.cat([actions, actions_batch])
         else:
             if mode == "train":
-                actions, actions_log_prob, values, mu, sigma = self.actor_critic.act(current_obs, current_states)
+                actions, actions_log_prob, values, mu, sigma = self.actor_critic.act(normalized_current_obs, current_states)
             else:
-                actions = self.actor_critic.act_inference(current_obs)
+                actions = self.actor_critic.act_inference(normalized_current_obs)
 
         if mode == "train":
+            # return original obs for storage
             return actions, actions_log_prob, values, mu, sigma, grad, current_obs
         else:
             return actions, grad, current_obs

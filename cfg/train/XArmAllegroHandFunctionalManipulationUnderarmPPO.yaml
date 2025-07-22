@@ -25,6 +25,8 @@ policy: # only works for MlpPolicy right now
   vf_state_encoder_hid_sizes: [512,256]
   pcl_feature_dim: 64
   activation: elu # can be elu, relu, selu, crelu, lrelu, tanh, sigmoid
+
+
 learn:
   agent_name: xarm_allegro_hand
   test: False
@@ -37,7 +39,9 @@ learn:
   max_iterations: 40000
 
   # training params
-  cliprange: 0.1 #0.2
+  normalize_input: False
+  normalize_value: False
+  cliprange: 0.2 #0.2
   ent_coef: 0
   nsteps: 12
   noptepochs: 2 #2 5
@@ -51,4 +55,4 @@ learn:
   init_noise_std: 0.8
 
   log_interval: 1
-  asymmetric: False 
+  asymmetric: False

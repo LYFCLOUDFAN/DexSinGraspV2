@@ -27,4 +27,4 @@ python src/train.py \
     --logdir="logs/PPO/07-15-21-03_xarm_allegro_singulation_ppo_objtype:all_labeltype:box_grid_singulation_objnum:5_objcat:box_maxpercat:-1_geo:all_scale:all_envnum:16_rewtype:succrew+rotrew+actionpen+mutual+fjcontact_seed0/" \
     --run_device_id=-1 \
     --web_visualizer_port=-1 \
-    --model_dir="logs/PPO/07-16-16-38_xarm_allegro_singulation_ppo_objtype:all_labeltype:box_grid_singulation_objnum:5_objcat:box_maxpercat:-1_geo:all_scale:all_envnum:4096_rewtype:succrew+tilt+slide+neighbor+actionpen_seed0/model_4000.pt" 
+    --model_dir="/home/ruoyi/Work/UniDexFPM/logs/PPO/07-22-23-28_xarm_allegro_singulation_ppo_objtype:all_labeltype:box_grid_singulation_objnum:5_objcat:box_maxpercat:-1_geo:all_scale:all_envnum:4096_rewtype:succrew+tilt+slide+neighbor+actionpen_seed0/model_4000.pt"

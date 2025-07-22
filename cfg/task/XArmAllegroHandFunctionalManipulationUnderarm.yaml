@@ -53,7 +53,10 @@ env:
   forceDecay: 0.99
   forceDecayInterval: 0.08
 
-  # reward -> dictionary  
+  # hand qpose
+  usePredefHandPose: False
+
+  # reward -> dictionary
   # For singulation task, use: "succrew+tilt+slide+neighbor+stability+actionpen"
   rewardType: ${resolve_default:succrew+tilt+slide+neighbor+stability+actionpen,${...reward_type}}
   # Legacy: "succrew+rotrew+actionpen+mutual+fjcontact+nominal"
@@ -84,7 +87,7 @@ env:
   slideRewardScale: 1.0  # Reward for sliding object forward along z-axis (20-30cm goal)
   neighborStabilityPenaltyScale: -5.0  # Penalty for moving non-target objects
   stabilityPenaltyScale: -2.0  # Penalty for unwanted Y/Z axis rotations (keep object stable)
-  
+
   # Goal pose parameters for singulation task
   goalTranslationZ: 0.25  # 25cm forward along z-axis
   goalRotationX: -0.80  # -45 degrees in radians around x-axis

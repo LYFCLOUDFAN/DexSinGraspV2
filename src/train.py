@@ -1,7 +1,8 @@
 import os
-import os
+
 if os.getenv("debug") != "":
     import debugpy
+
     debugpy.listen(("localhost", 9999))
     print("Waiting for debugger attach")
     debugpy.wait_for_client()
@@ -13,6 +14,7 @@ from isaacgymenvs.utils.utils import set_np_formatting, set_seed
 from algorithms.ppo import PPO
 from tasks import load_isaacgym_env
 from utils.config import get_args, load_cfg
+
 # from utils.vis import Visualizer # use visualizer requires to install sim-web-visualizer
 
 if __name__ == "__main__":
@@ -20,7 +22,9 @@ if __name__ == "__main__":
 
     # argparse
     parser = get_args_parser()
-    parser.add_argument("--num_iterations", type=int, default=1000, help="Number of iterations to run")
+    parser.add_argument(
+        "--num_iterations", type=int, default=1000, help="Number of iterations to run"
+    )
     parser.add_argument("--seed", type=int, default=0, help="Seed Number")
     parser.add_argument("--run_device_id", type=int, default=0, help="Device id")
 
@@ -30,29 +34,54 @@ if __name__ == "__main__":
         default=False,
         help="Apply additional PyTorch settings for more deterministic behaviour",
     )
-    parser.add_argument("--test", action="store_true", default=False, help="Run trained policy, no training")
-    parser.add_argument("--con", action="store_true", default=False, help="whether continue train")
     parser.add_argument(
-        "--web_visualizer_port", type=int, default=-1, help="port to visualize in web visualizer, set to -1 to disable"
+        "--test",
+        action="store_true",
+        default=False,
+        help="Run trained policy, no training",
     )
-    parser.add_argument("--collect_demo_num", type=int, default=-1, help="collect demo num")
-    parser.add_argument("--eval_times", type=int, default=5, help="Eval times for each object")
-    parser.add_argument("--max_iterations", type=int, default=-1, help="Max iterations for training")
+    parser.add_argument(
+        "--con", action="store_true", default=False, help="whether continue train"
+    )
+    parser.add_argument(
+        "--web_visualizer_port",
+        type=int,
+        default=-1,
+        help="port to visualize in web visualizer, set to -1 to disable",
+    )
+    parser.add_argument(
+        "--collect_demo_num", type=int, default=-1, help="collect demo num"
+    )
+    parser.add_argument(
+        "--eval_times", type=int, default=5, help="Eval times for each object"
+    )
+    parser.add_argument(
+        "--max_iterations", type=int, default=-1, help="Max iterations for training"
+    )
 
     parser.add_argument(
-        "--cfg_train", type=str, default="ShadowHandFunctionalManipulationUnderarmPPO", help="Training config"
+        "--cfg_train",
+        type=str,
+        default="XArmAllegroHandFunctionalManipulationUnderarmPPO",
+        help="Training config",
     )
 
     parser.add_argument("--logdir", type=str, default="", help="Log directory")
     parser.add_argument("--method", type=str, default="", help="Method name")
     parser.add_argument("--exp_name", type=str, default="", help="Exp name")
     parser.add_argument("--model_dir", type=str, default="", help="Choose a model dir")
-    parser.add_argument("--eval_name", type=str, default="", help="Eval metric saving name")
-    parser.add_argument("--vis_env_num", type=int, default=0, help="Number of env to visualize")
+    parser.add_argument(
+        "--eval_name", type=str, default="", help="Eval metric saving name"
+    )
+    parser.add_argument(
+        "--vis_env_num", type=int, default=0, help="Number of env to visualize"
+    )
 
     # score matching parameter
     parser.add_argument("--t0", type=float, default=0.05, help="t0 for sample")
-    parser.add_argument("--hidden_dim", type=int, default=1024, help="num of hidden dim")
+    parser.add_argument(
+        "--hidden_dim", type=int, default=1024, help="num of hidden dim"
+    )
     parser.add_argument("--embed_dim", type=int, default=512, help="num of embed_dim")
     parser.add_argument("--score_mode", type=str, default="target", help="score mode")
     parser.add_argument("--space", type=str, default="euler", help="angle space")
@@ -60,7 +89,9 @@ if __name__ == "__main__":
     parser.add_argument("--n_obs_steps", type=int, default=2, help="observation steps")
     parser.add_argument("--n_action_steps", type=int, default=1)
     parser.add_argument("--n_prediction_steps", type=int, default=4)
-    parser.add_argument("--encode_state_type", type=str, default="all", help="encode state type")
+    parser.add_argument(
+        "--encode_state_type", type=str, default="all", help="encode state type"
+    )
     parser.add_argument(
         "--score_action_type",
         type=str,
@@ -69,7 +100,11 @@ if __name__ == "__main__":
         help="score action type: arm, hand, all",
     )
     parser.add_argument(
-        "--action_mode", type=str, default="rel", metavar="ACTION_MODE", help="action mode: rel, abs, obs"
+        "--action_mode",
+        type=str,
+        default="rel",
+        metavar="ACTION_MODE",
+        help="action mode: rel, abs, obs",
     )
     parser.add_argument(
         "--score_model_path",
@@ -80,18 +115,8 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    # if args.web_visualizer_port != -1:
-    #     visualizer = Visualizer(args.web_visualizer_port)
-
-    # Set devices based on run_device_id
-    if args.run_device_id == -1:
-        # CPU mode
-        sim_device = "cpu"
-        rl_device = "cpu"
-    else:
-        # GPU mode
-        sim_device = f"cuda:{args.run_device_id}"
-        rl_device = f"cuda:{args.run_device_id}"
+    sim_device = f"cuda:{args.run_device_id}" if args.run_device_id >= 0 else "cpu"
+    rl_device = f"cuda:{args.run_device_id}" if args.run_device_id >= 0 else "cpu"
 
     cfg_train, logdir = load_cfg(args)
 
@@ -99,7 +124,7 @@ if __name__ == "__main__":
     set_seed(args.seed)
     """Change for different methods."""
     action_space = ["hand_rotation"]
-    
+
     if args.exp_name == "PPO":
         if "env_mode=orn" in args.overrides:
             obs_space = [
@@ -156,7 +181,7 @@ if __name__ == "__main__":
                 obs_space = [
                     # Hand state
                     "xarm_endeffector_position",
-                    "xarm_endeffector_orientation", 
+                    "xarm_endeffector_orientation",
                     "xarm_endeffector_linear_velocity",
                     "xarm_endeffector_angular_velocity",
                     "allegro_hand_dof_position",
@@ -243,7 +268,7 @@ if __name__ == "__main__":
         cfg_train["learn"]["gamma"] = 0.99
         cfg_train["learn"]["clip_range"] = 0.1
     else:
-        raise NotImplementedError(f"setting {args.exp_name} not supported") 
+        raise NotImplementedError(f"setting {args.exp_name} not supported")
     """
     load env
     """
@@ -282,14 +307,23 @@ if __name__ == "__main__":
         args=args,
     )
 
-    if args.model_dir != "":
-        if is_testing:
-            runner.test(chkpt_path)
-        else:
-            runner.load(chkpt_path)
-
     iterations = cfg_train["learn"]["max_iterations"]
     if args.max_iterations > 0:
         iterations = args.max_iterations
 
-    runner.run(num_learning_iterations=iterations, log_interval=cfg_train["learn"]["save_interval"])
+    if args.model_dir != "":
+        if is_testing:
+            runner.restore_test(chkpt_path)
+            runner.eval(0)
+        else:
+            runner.restore_train(chkpt_path)
+            runner.train(
+                num_learning_iterations=iterations,
+                log_interval=cfg_train["learn"]["save_interval"],
+            )
+
+    else:  # train from scratch
+        runner.train(
+            num_learning_iterations=iterations,
+            log_interval=cfg_train["learn"]["save_interval"],
+        )

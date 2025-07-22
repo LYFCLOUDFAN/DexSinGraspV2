@@ -72,65 +72,97 @@ class ActorCritic(nn.Module):
 
         # tactile feature encoder
         if self.tactile_dim > 0:
-            self.actor_tactile_enc = self.build_block(self.tactile_dim, actor_hidden_dim, activation, [])
+            self.actor_tactile_enc = self.build_block(
+                self.tactile_dim, actor_hidden_dim, activation, []
+            )
             self.total_feat_num += 1
         # pointcloud feature encoder
         if self.pcl_dim > 0:
             self.pcl_feature_dim = model_cfg["pcl_feature_dim"]
-            self.actor_pcl_enc = self.build_block(self.pcl_feature_dim, actor_hidden_dim, activation, [])
+            self.actor_pcl_enc = self.build_block(
+                self.pcl_feature_dim, actor_hidden_dim, activation, []
+            )
             self.total_feat_num += 1
         # gradient feature encoder
         if self.grad_dim > 0:
-            self.actor_grad_enc = self.build_block(self.grad_dim, actor_hidden_dim, activation, [])
+            self.actor_grad_enc = self.build_block(
+                self.grad_dim, actor_hidden_dim, activation, []
+            )
             self.total_feat_num += 1
 
         # fuse feature
         if self.total_feat_num > 1:
-            self.actor_fuse = self.build_block(actor_hidden_dim * self.total_feat_num, actor_hidden_dim, activation, [])
+            self.actor_fuse = self.build_block(
+                actor_hidden_dim * self.total_feat_num, actor_hidden_dim, activation, []
+            )
 
         # mlp output
         self.actor_output = self.build_block(
-            actor_hidden_dim, self.action_dim, activation, [], activate_for_last_layer=False
+            actor_hidden_dim,
+            self.action_dim,
+            activation,
+            [],
+            activate_for_last_layer=False,
         )
         """Critic layer."""
         # state encoder
         critic_state_encoder_hid_sizes = model_cfg["vf_state_encoder_hid_sizes"]
         critic_hidden_dim = critic_state_encoder_hid_sizes[-1]
         self.critic_state_enc = self.build_block(
-            self.state_dim, critic_hidden_dim, activation, critic_state_encoder_hid_sizes
+            self.state_dim,
+            critic_hidden_dim,
+            activation,
+            critic_state_encoder_hid_sizes,
         )
 
         # tactile feature encoder
         if self.tactile_dim > 0:
-            self.critic_tactile_enc = self.build_block(self.tactile_dim, critic_hidden_dim, activation, [])
+            self.critic_tactile_enc = self.build_block(
+                self.tactile_dim, critic_hidden_dim, activation, []
+            )
 
         # pointcloud feature encoder
         if self.pcl_dim > 0:
-            self.critic_pcl_enc = self.build_block(self.pcl_feature_dim, critic_hidden_dim, activation, [])
+            self.critic_pcl_enc = self.build_block(
+                self.pcl_feature_dim, critic_hidden_dim, activation, []
+            )
 
         # gradient feature encoder
         if self.grad_dim > 0:
-            self.critic_grad_enc = self.build_block(self.grad_dim, critic_hidden_dim, activation, [])
+            self.critic_grad_enc = self.build_block(
+                self.grad_dim, critic_hidden_dim, activation, []
+            )
 
         # fuse feature
         if self.total_feat_num > 1:
             # mlp output
             self.critic_fuse = self.build_block(
-                critic_hidden_dim * self.total_feat_num, critic_hidden_dim, activation, []
+                critic_hidden_dim * self.total_feat_num,
+                critic_hidden_dim,
+                activation,
+                [],
             )
 
         # mlp output
-        self.critic_output = self.build_block(critic_hidden_dim, 1, activation, [], activate_for_last_layer=False)
+        self.critic_output = self.build_block(
+            critic_hidden_dim, 1, activation, [], activate_for_last_layer=False
+        )
 
         if self.pcl_dim > 0:
             """Shared layer."""
             if self.shared_pointnet:
                 if self.pointnet_type == "pt":
-                    self.pointnet_enc = PointNetEncoder(num_points=self.pcl_dim, out_dim=self.pcl_feature_dim)
+                    self.pointnet_enc = PointNetEncoder(
+                        num_points=self.pcl_dim, out_dim=self.pcl_feature_dim
+                    )
             else:
                 if self.pointnet_type == "pt":
-                    self.actor_pointnet_enc = PointNetEncoder(num_points=self.pcl_dim, out_dim=self.pcl_feature_dim)
-                    self.critic_pointnet_enc = PointNetEncoder(num_points=self.pcl_dim, out_dim=self.pcl_feature_dim)
+                    self.actor_pointnet_enc = PointNetEncoder(
+                        num_points=self.pcl_dim, out_dim=self.pcl_feature_dim
+                    )
+                    self.critic_pointnet_enc = PointNetEncoder(
+                        num_points=self.pcl_dim, out_dim=self.pcl_feature_dim
+                    )
 
         # Action noise
         self.log_std = nn.Parameter(np.log(initial_std) * torch.ones(*actions_shape))
@@ -139,10 +171,19 @@ class ActorCritic(nn.Module):
     def init_weights(sequential, scales):
         [
             torch.nn.init.orthogonal_(module.weight, gain=scales[idx])
-            for idx, module in enumerate(mod for mod in sequential if isinstance(mod, nn.Linear))
+            for idx, module in enumerate(
+                mod for mod in sequential if isinstance(mod, nn.Linear)
+            )
         ]
 
-    def build_block(self, input_dim, output_dim, activation, hidden_dim, activate_for_last_layer=True):
+    def build_block(
+        self,
+        input_dim,
+        output_dim,
+        activation,
+        hidden_dim,
+        activate_for_last_layer=True,
+    ):
         layers = []
         if len(hidden_dim) == 0:
             layers.append(nn.Linear(input_dim, output_dim))
@@ -168,7 +209,9 @@ class ActorCritic(nn.Module):
         """Process observation."""
         batch_size = observations.size(0)
 
-        state_batch, tactile_batch, pcl_batch, gf_batch = self.process_observations(observations=observations)
+        state_batch, tactile_batch, pcl_batch, gf_batch = self.process_observations(
+            observations=observations
+        )
         """forward."""
         # state encoder
         state_feat = self.actor_state_enc(state_batch)
@@ -210,7 +253,9 @@ class ActorCritic(nn.Module):
         """Process observation."""
         batch_size = observations.size(0)
 
-        state_batch, tactile_batch, pcl_batch, gf_batch = self.process_observations(observations=observations)
+        state_batch, tactile_batch, pcl_batch, gf_batch = self.process_observations(
+            observations=observations
+        )
         """forward."""
         # state encoder
         state_feat = self.critic_state_enc(state_batch)
@@ -332,7 +377,13 @@ class ActorCritic(nn.Module):
         else:
             value = self.forward_critic(observations)
 
-        return actions_log_prob, entropy, value, actions_mean, self.log_std.repeat(actions_mean.shape[0], 1)
+        return (
+            actions_log_prob,
+            entropy,
+            value,
+            actions_mean,
+            self.log_std.repeat(actions_mean.shape[0], 1),
+        )
 
 
 def get_activation(act_name):
