@@ -20,9 +20,10 @@ python src/train.py \
     physics_engine=physx \
     --seed=0 \
     --exp_name='PPO' \
-    --logdir='xarm_allegro_singulation_ppo' \
+    --logdir='' \
     --run_device_id=-1 \
-    --web_visualizer_port=-1
+    --web_visualizer_port=-1 \
+    --print_log=False
     # task.env.enableDebugVis=True \
     # task.env.visEnvNum=2 \
     # reward_type=succrew+tilt+slide+neighbor+stability+actionpen \

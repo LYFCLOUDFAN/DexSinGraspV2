@@ -35,6 +35,36 @@ def warn_task_name():
 def warn_algorithm_name():
     raise Exception("Unrecognized algorithm!\nAlgorithm should be one of: [ppo, happo, hatrpo, mappo]")
 
+def class_to_dict(obj) -> dict:
+    
+    if not  hasattr(obj,"__dict__"):
+        return obj
+    
+    if isinstance(obj, dict):
+        return obj
+
+    result = {}
+    for key in dir(obj):
+        if key.startswith("_"):
+            continue
+        element = []
+        val = getattr(obj, key)
+        if isinstance(val, list):
+            for item in val:
+                element.append(class_to_dict(item))
+        else:
+            element = class_to_dict(val)
+        result[key] = element
+    return result
+
+def update_class_from_dict(obj, dict):
+    for key, val in dict.items():
+        attr = getattr(obj, key, None)
+        if isinstance(attr, type):
+            update_class_from_dict(attr, val)
+        else:
+            setattr(obj, key, val)
+    return
 
 def set_seed(seed, torch_deterministic=False):
     if seed == -1 and torch_deterministic:
@@ -117,7 +147,10 @@ def retrieve_cfg(args, use_rlg_config=False):
         warn_task_name()
 
 
-def load_cfg(args):
+
+
+
+def load_cfg(args, overrides=None):
     with open(os.path.join(os.path.dirname(__file__), "../../cfg/train/", args.cfg_train + ".yaml"), "r") as f:
         cfg_train = yaml.load(f, Loader=yaml.SafeLoader)
 
@@ -130,6 +163,9 @@ def load_cfg(args):
     # Override seed if passed on the command line
     if args.seed is not None:
         cfg_train["seed"] = args.seed
+    
+    if not args.print_log:
+        cfg_train["learn"]["print_log"] = False
 
     return cfg_train, logdir
 

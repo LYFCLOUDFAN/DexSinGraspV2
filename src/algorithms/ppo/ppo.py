@@ -332,6 +332,8 @@ class PPO:
                 yaml.dump(cfg_train, f)
 
         self.print_log = print_log
+        from loguru import logger as log
+        log.info(f"print_log: {self.print_log}")
         if self.print_log:
             self.episode_rewards = AverageScalarMeter(200)
             self.episode_lengths = AverageScalarMeter(200)

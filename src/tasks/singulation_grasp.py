@@ -253,7 +253,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         "joint_15.0": 0.0,
     }
 
-    _xarm_right_init_position = [0.00, 0.70, 0.00]
+    _xarm_right_init_position = [0.00, 0.65, 0.00]
     _xarm_right_init_orientation = [0.0, 0.0, -np.sqrt(0.5), np.sqrt(0.5)]
     _allegro_hand_predef_qpos = [0] * 16  # reset if use predef qpos
     _target_hand_palm_pose = [-0.4, 0.053, 0.810, 0.0, -0.707, 0.707, 0.0]
@@ -344,13 +344,13 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
     object_spacing: float
     num_objects_per_env: int
 
-    _box_width: float = 0.04
-    _box_depth: float = 0.16
-    _box_height: float = 0.24
+    _obj_width: float = 0.04
+    _obj_depth: float = 0.16
+    _obj_height: float = 0.24
     _grid_rows: int = 1
     _grid_cols: int = 5
     _grid_layers: int = 1
-    _box_spacing: float = 0.005
+    _obj_spacing: float = 0.005
 
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render):
         seed = cfg["env"]["seed"]
@@ -2121,44 +2121,64 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         print(">>> Creating box grid for singulation task")
 
         config = {}
-        config["warehouse"] = []
+        config["warehouse"] = {
+            "targ_obj": [],
+            "surr_obj": [],
+        }
 
-        asset_options = gymapi.AssetOptions()
-        asset_options.density = 1500.0
-        asset_options.convex_decomposition_from_submeshes = True
-        asset_options.override_com = True
-        asset_options.override_inertia = True
+        target_asset_options = gymapi.AssetOptions()
+        target_asset_options.density = 1000.0
+        target_asset_options.convex_decomposition_from_submeshes = True
+        target_asset_options.override_com = True
+        target_asset_options.override_inertia = True
+        
+        surrounding_asset_options = gymapi.AssetOptions()
+        surrounding_asset_options.density = 1000.0
+        surrounding_asset_options.convex_decomposition_from_submeshes = True
+        surrounding_asset_options.override_com = True
+        surrounding_asset_options.override_inertia = True
+        surrounding_asset_options.disable_gravity = True
+        surrounding_asset_options.fix_base_link = True
 
-        for i in range(self.num_objects_per_env):
-            box_asset = self.gym.create_box(self.sim, self._box_width, self._box_depth, self._box_height, asset_options)
+        target_box_asset = self.gym.create_box(self.sim, self._obj_width, self._obj_depth, self._obj_height, target_asset_options)
+        surrounding_box_asset = self.gym.create_box(self.sim, self._obj_width, self._obj_depth, self._obj_height, surrounding_asset_options)
 
-            rigid_shape_props = self.gym.get_asset_rigid_shape_properties(box_asset)
-            for shape in rigid_shape_props:
-                shape.friction = 0.8
-                shape.restitution = 0.1
-            self.gym.set_asset_rigid_shape_properties(box_asset, rigid_shape_props)
+        _targ_rigid_shape_props = self.gym.get_asset_rigid_shape_properties(target_box_asset)
+        _surr_rigid_shape_props = self.gym.get_asset_rigid_shape_properties(surrounding_box_asset)
+        for shape in _targ_rigid_shape_props:
+            shape.friction = 0.8
+            shape.restitution = 0.1
+        for shape in _surr_rigid_shape_props:
+            shape.friction = 0.8
+            shape.restitution = 0.1
+        self.gym.set_asset_rigid_shape_properties(target_box_asset, _targ_rigid_shape_props)
+        self.gym.set_asset_rigid_shape_properties(surrounding_box_asset, _surr_rigid_shape_props)
 
-            cfg = {
-                "name": f"box_{i}",
-                "asset": box_asset,
-                "num_rigid_bodies": self.gym.get_asset_rigid_body_count(box_asset),
-                "num_rigid_shapes": self.gym.get_asset_rigid_shape_count(box_asset),
-            }
-            config["warehouse"].append(cfg)
+        config["warehouse"]["targ_obj"].append({
+            "name": "target_box",
+            "asset": target_box_asset,
+            "num_rigid_bodies": self.gym.get_asset_rigid_body_count(target_box_asset),
+            "num_rigid_shapes": self.gym.get_asset_rigid_shape_count(target_box_asset),
+        })
+        config["warehouse"]["surr_obj"].append({
+            "name": "surrounding_box",
+            "asset": surrounding_box_asset,
+            "num_rigid_bodies": self.gym.get_asset_rigid_body_count(surrounding_box_asset),
+            "num_rigid_shapes": self.gym.get_asset_rigid_shape_count(surrounding_box_asset),
+        })
+        config["count"] = len(config["warehouse"]["targ_obj"])
 
-        config["count"] = len(config["warehouse"])
+        num_rigid_bodies = [cfg_targ["num_rigid_bodies"] + cfg_surr["num_rigid_bodies"] for cfg_targ, cfg_surr in zip(config["warehouse"]["targ_obj"], config["warehouse"]["surr_obj"])]
+        num_rigid_shapes = [cfg_targ["num_rigid_shapes"] + cfg_surr["num_rigid_shapes"] for cfg_targ, cfg_surr in zip(config["warehouse"]["targ_obj"], config["warehouse"]["surr_obj"])]
+        config["num_rigid_bodies"] = sum(sorted(num_rigid_bodies, reverse=True)[: self.num_objects_per_env])
+        config["num_rigid_shapes"] = sum(sorted(num_rigid_shapes, reverse=True)[: self.num_objects_per_env])
 
-        # Calculate total rigid bodies and shapes needed for ALL boxes in the environment
-        # Each box has 1 rigid body and 1 rigid shape, and we have num_objects_per_env boxes
-        config["num_rigid_bodies"] = self.num_objects_per_env * 1  # 25 boxes × 1 body each = 25
-        config["num_rigid_shapes"] = self.num_objects_per_env * 1   # 25 boxes × 1 shape each = 25
-
-        config["poses"] = self.__generate_box_poses()
+        config["poses"] = self.__generate_object_poses()
 
         print(f">>> Box grid created with {len(config['warehouse'])} box assets")
         return config
 
-    def __generate_box_poses(self) -> List[gymapi.Transform]:
+    def __generate_object_poses(self) -> List[gymapi.Transform]:
         """Generate poses for boxes in a grid pattern on the table.
 
         Returns:
@@ -2169,15 +2189,15 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         # Calculate grid center position on table
         table_center_x = self._table_pose[0]
         table_center_y = self._table_pose[1]
-        table_top_z = self._table_pose[2] + (self._table_thickness + self._box_height) / 2 + 0.01
+        table_top_z = self._table_pose[2] + (self._table_thickness + self._obj_height) / 2 + 1e-3
 
         # Calculate grid dimensions
-        grid_width = self._grid_cols * self._box_width + (self._grid_cols - 1) * self._box_spacing
-        grid_height = self._grid_rows * self._box_depth + (self._grid_rows - 1) * self._box_spacing
+        grid_width = self._grid_cols * self._obj_width + (self._grid_cols - 1) * self._obj_spacing
+        grid_height = self._grid_rows * self._obj_depth + (self._grid_rows - 1) * self._obj_spacing
 
         # Starting position (top-left corner of grid)
-        start_x = table_center_x - grid_width / 2 + self._box_width / 2
-        start_y = table_center_y - grid_height / 2 + self._box_depth / 2
+        start_x = table_center_x - grid_width / 2 + self._obj_width / 2
+        start_y = table_center_y - grid_height / 2 + self._obj_depth / 2
 
         # Generate poses for each box in the grid
         for i in range(self.num_objects_per_env):
@@ -2186,8 +2206,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
             pose = gymapi.Transform()
             pose.p = gymapi.Vec3(
-                start_x + col * (self._box_width + self._box_spacing),
-                start_y + row * (self._box_depth + self._box_spacing),
+                start_x + col * (self._obj_width + self._obj_spacing),
+                start_y + row * (self._obj_depth + self._obj_spacing),
                 table_top_z
             )
             pose.r = gymapi.Quat(0, 0, 0, 1)  # No rotation
@@ -2314,9 +2334,9 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             grid_rows=self._grid_rows,
             grid_cols=self._grid_cols,
             grid_layers=self._grid_layers,
-            box_width=self._box_width,
-            box_depth=self._box_depth,
-            box_height=self._box_height,
+            box_width=self._obj_width,
+            box_depth=self._obj_depth,
+            box_height=self._obj_height,
             device=device,
         )
 
@@ -2435,12 +2455,16 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         num_bodies += gym_assets["current"]["robot"]["num_rigid_bodies"]
         num_shapes += gym_assets["current"]["robot"]["num_rigid_shapes"]
-
         num_current_objects = gym_assets["current"]["objects"]["count"]
-        for i in range(self.num_objects_per_env):
+        
+        num_bodies += gym_assets["current"]["objects"]["warehouse"]["targ_obj"][(env * self.num_objects_per_env) % num_current_objects]["num_rigid_bodies"]
+        num_shapes += gym_assets["current"]["objects"]["warehouse"]["targ_obj"][(env * self.num_objects_per_env) % num_current_objects]["num_rigid_shapes"]
+
+        for i in range(1, self.num_objects_per_env):
             cur = (env * self.num_objects_per_env + i) % num_current_objects
-            num_bodies += gym_assets["current"]["objects"]["warehouse"][cur]["num_rigid_bodies"]
-            num_shapes += gym_assets["current"]["objects"]["warehouse"][cur]["num_rigid_shapes"]
+
+            num_bodies += gym_assets["current"]["objects"]["warehouse"]["surr_obj"][cur]["num_rigid_bodies"]
+            num_shapes += gym_assets["current"]["objects"]["warehouse"]["surr_obj"][cur]["num_rigid_shapes"]
 
         num_bodies += gym_assets["current"]["table"]["num_rigid_bodies"]
         num_shapes += gym_assets["current"]["table"]["num_rigid_shapes"]
@@ -2504,28 +2528,26 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             )
             allegro_hand_indices.append(actor_index)
 
-            # add box grid to the environment
             poses = self.gym_assets["current"]["objects"]["poses"]
             for k in range(self.num_objects_per_env):
-                cfg = self.gym_assets["current"]["objects"]["warehouse"][k % len(self.gym_assets["current"]["objects"]["warehouse"])]
+                is_target = (k == occupied_object_indices_per_env[i])
+                cfg = self.gym_assets["current"]["objects"]["warehouse"]["targ_obj"][k % len(self.gym_assets["current"]["objects"]["warehouse"]["targ_obj"])] if is_target else self.gym_assets["current"]["objects"]["warehouse"]["surr_obj"][k % len(self.gym_assets["current"]["objects"]["warehouse"]["surr_obj"])]
                 pose = poses[k]
 
-                non_target_color = gymapi.Vec3(0.9, 0.0, 0.0)
-                target_color = gymapi.Vec3(0.9, 0.9, 0.9)
+                surr_obj_color = gymapi.Vec3(0.9, 0.0, 0.0)
+                targ_obj_color = gymapi.Vec3(0.9, 0.9, 0.9)
 
-                if occupied_object_indices_per_env[i] == k:
-                    color = target_color
-                    actor_index = self.__create_sim_actor(env, cfg, i, "target_object", pose, color=color)
+                if is_target:
+                    actor_index = self.__create_sim_actor(env, cfg, i, "targ_obj", pose, color=targ_obj_color)
                 else:
-                    color = non_target_color
-                    actor_index = self.__create_sim_actor(env, cfg, i, f"box_{k}", pose, color=color)
+                    actor_index = self.__create_sim_actor(env, cfg, i, f"sur_obj_{k}", pose, color=surr_obj_color)
 
 
                 object_indices[i].append(actor_index)
                 object_names[i].append(cfg["name"])
                 object_encodings[i].append(k)
 
-                if occupied_object_indices_per_env[i] == k:
+                if is_target:
                     occupied_object_indices.append(actor_index)  # global actor index for root_states access
                 else:
                     non_occupied_object_indices[i].append(k)  #relative index within environment
@@ -3121,8 +3143,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         # pick = (1 - 1_picked) * h_t + r_picked
 
         self.delta_obj_height = self.object_root_positions[:, 2] - self.occupied_object_init_root_positions[:, 2]
-        self.picked = self.delta_obj_height > 0.20
-        self.pick_rew = torch.clip((1 - self.picked.float()) * self.delta_obj_height * 100, min=0) + self.picked * 300
+        self.picked = self.delta_obj_height > 0.15
+        self.pick_rew = (torch.clip((1 - self.picked.float()) * self.delta_obj_height * 100, min=-0.1) + self.picked * 300) * (self.y_displacement > 0.0).float()
         self.pick_rew_scaled = self.pick_rew * (1)
 
         self.extras["pick_rew"] = self.pick_rew_scaled.clone()
@@ -3167,9 +3189,9 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         self.targ_rew = torch.where(
             self.goal_position_dist < 0.075,
-            self.picked.float() * clipped_delta * 200 + self.reach_goal_bonus,
-            self.picked.float() * clipped_delta * 200,
-        )
+            self.picked.float() * clipped_delta * 250 + self.reach_goal_bonus,
+            self.picked.float() * clipped_delta * 250,
+        ) * (self.y_displacement > 0.0).float()
         self.targ_rew_scaled = self.targ_rew * (1)
         self.succ_rew = (self.goal_position_dist < 0.075).float() * self.reach_goal_bonus
         self.goal_position_dist_min = torch.min(self.goal_position_dist_min, self.goal_position_dist)
@@ -3248,19 +3270,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.extras["similarity_reward"] = self.similarity_reward_scaled.clone()
         # TODO smaller change no need to consider as diff
         self.extras["diff_direction"] = torch.sum(
-            torch.sign(
-                torch.cat([arm_pos_similarity, arm_rot_similarity, hand_similarity], -1)
-            )
-            < 0
-            * (
-                abs(
-                    torch.cat(
-                        [arm_pos_similarity, arm_rot_similarity, hand_similarity], -1
-                    )
-                )
-                > 0.01
-            ),
-            -1,
+            torch.sign(torch.cat([arm_pos_similarity, arm_rot_similarity, hand_similarity], -1)) < 0 
+            * (abs(torch.cat([arm_pos_similarity, arm_rot_similarity, hand_similarity], -1)) > 0.01), -1,
         )
         # arm pos diff direction
         self.extras["arm_pos_diff_direction"] = torch.sum(
@@ -3288,16 +3299,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         current_euler = torch.stack(get_euler_xyz(self.object_root_orientations), dim=1)
 
-
-        # Target rotation: -45 degrees around x-axis
-
-        # Target rotation: -45 degrees around x-axis
         target_x_rotation = self.goal_rotation_x
-
-
-        # Compute rotation error around x-axis
-
-        # Compute rotation error around x-axis
         x_rotation_error = torch.abs(current_euler[:, 0] - target_x_rotation)
 
         self.tilt_reward = torch.exp(-x_rotation_error / 0.1)
@@ -3309,22 +3311,22 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
     def compute_slide_reward(self):
         """Compute slide reward - reward for moving the object forward along z-axis."""
 
-        y_displacement = self.object_root_positions[:, 1] - self.occupied_object_init_root_positions[:, 1]
+        self.y_displacement = self.object_root_positions[:, 1] - self.occupied_object_init_root_positions[:, 1]
 
         # Target displacement is goal_translation_z (e.g., 25cm forward)
         target_y_displacement = self.goal_translation_y
 
         # Compute distance to target z position
-        y_error = torch.abs(y_displacement - target_y_displacement)
+        y_error = torch.abs(self.y_displacement - target_y_displacement)
 
         # Reward inversely proportional to distance from target
         # ln(40 * (-y_error + 1.25))
-        # self.slide_reward = torch.log(160 * (-y_error + 1.25))
-        self.slide_reward = torch.clamp(-160 * (y_error - 0.25) * (y_error + 0.25), min=0)
+        # self.slide_reward = torch.log(16 * (-y_error + 1.25))
+        self.slide_reward = torch.clamp(-25 * (y_error - 0.2) * (y_error + 0.2), min=0)
         self.slide_reward_scaled = self.slide_reward * self.slide_reward_scale
 
         self.extras["slide_reward"] = self.slide_reward_scaled.clone()
-        self.extras["y_displacement"] = y_displacement.clone()
+        self.extras["y_displacement"] = self.y_displacement.clone()
         self.extras["y_error"] = y_error.clone()
 
     def compute_neighbor_stability_penalty(self):
@@ -3379,33 +3381,23 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
     def compute_stability_penalty(self):
         """Compute penalty for unwanted Y and Z axis rotations (keep object stable in those dimensions)."""
         from .torch_utils import get_euler_xyz
-
-
-        # Get current object orientation as euler angles
-
-        # Get current object orientation as euler angles
         current_euler = torch.stack(get_euler_xyz(self.object_root_orientations), dim=1)
 
-        # Extract Y and Z rotations (we want these to stay close to 0)
         y_rotation = current_euler[:, 1]  # Y-axis rotation (pitch)
         z_rotation = current_euler[:, 2]  # Z-axis rotation (yaw)
 
-        # Normalize angles to [-π, π] range (closest to 0)
         y_rotation_normalized = torch.atan2(torch.sin(y_rotation), torch.cos(y_rotation))
         z_rotation_normalized = torch.atan2(torch.sin(z_rotation), torch.cos(z_rotation))
 
-        # Compute penalties for deviations from 0 for both Y and Z axes
         y_rotation_error = torch.abs(y_rotation_normalized)
         z_rotation_error = torch.abs(z_rotation_normalized)
 
-        # Combined stability penalty (penalize both Y and Z rotations)
         total_rotation_error = y_rotation_error + z_rotation_error
         self.stability_penalty_scaled = total_rotation_error * self.stability_penalty_scale
 
-        # Store individual components for debugging
         self.y_rotation_error = y_rotation_error
         self.z_rotation_error = z_rotation_error
-        self.y_rotation_normalized = y_rotation_normalized  # Store normalized values
+        self.y_rotation_normalized = y_rotation_normalized
         self.z_rotation_normalized = z_rotation_normalized
 
         self.extras["stability_penalty"] = self.stability_penalty_scaled.clone()
@@ -3474,8 +3466,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         # if "tilt" in self.reward_type:
         #     self.compute_tilt_reward()
-        # if "slide" in self.reward_type:
-        #     self.compute_slide_reward()
+        if "slide" in self.reward_type:
+            self.compute_slide_reward()
         # if "neighbor" in self.reward_type:
         #     self.compute_neighbor_stability_penalty()
         # if "stability" in self.reward_type:
