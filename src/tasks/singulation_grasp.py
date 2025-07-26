@@ -187,7 +187,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         "link_8.0", "link_9.0", "link_10.0", "link_11.0",
         "link_12.0", "link_13.0", "link_14.0", "link_15.0",
     ]
-    _fingertips: List[str] = ["link_3.0_tip", "link_7.0_tip", "link_11.0_tip", "link_15.0_tip"]
+    _fingertips: List[str] = ["link_3.0_tip", "link_7.0_tip", "link_11.0_tip", "link_15.0_tip"] # index, middle, ring, thumb
     _allegro_hand_center_prim: str = "base_link"
     _allegro_hand_palm_prim: str = "palm"
     # fmt: off
@@ -1180,6 +1180,11 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.fingertip_orientations = self.fingertip_states[..., 3:7]
         self.fingertip_linear_velocities = self.fingertip_states[..., 7:10]
         self.fingertip_angular_velocities = self.fingertip_states[..., 10:13]
+        
+        self.index_fingertip_positions = self.fingertip_positions[:, 0, :]
+        self.middle_fingertip_positions = self.fingertip_positions[:, 1, :]
+        self.ring_fingertip_positions = self.fingertip_positions[:, 2, :]
+        self.thumb_fingertip_positions = self.fingertip_positions[:, 3, :]
 
         self.keypoint_positions = self.allegro_hand_rigid_body_positions[:, self.keypoint_indices, :]
 
@@ -2127,13 +2132,13 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         }
 
         target_asset_options = gymapi.AssetOptions()
-        target_asset_options.density = 1000.0
+        target_asset_options.density = 2000.0
         target_asset_options.convex_decomposition_from_submeshes = True
         target_asset_options.override_com = True
         target_asset_options.override_inertia = True
         
         surrounding_asset_options = gymapi.AssetOptions()
-        surrounding_asset_options.density = 1000.0
+        surrounding_asset_options.density = 2000.0
         surrounding_asset_options.convex_decomposition_from_submeshes = True
         surrounding_asset_options.override_com = True
         surrounding_asset_options.override_inertia = True
@@ -2281,7 +2286,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
     def __define_target_object(self, dataset: str = "boxes") -> Dict[str, Any]:
         """For singulation task, we don't need target objects with reference poses."""
-        # Return empty config as we don't need target objects for singulation
         return {
             "warehouse": [],
             "count": 0,
@@ -3122,7 +3126,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             action_penalty = torch.sum(actions**2, dim=-1)
             self.action_penalty_scaled = action_penalty * 0
 
-    def compute_reach_reward(self):
+    def compute_reach_reward_(self):
         """Compute reach reward - reward for reaching the target object."""
         # max(d_closest - d, 0) d is between mean position for fingertips and target object
         self.keypoints_to_obj_dist = torch.mean(
@@ -3137,6 +3141,29 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             self.keypoints_to_obj_dist_min, self.keypoints_to_obj_dist
         )
         self.extras["keypoints_to_obj_dist_min"] = self.keypoints_to_obj_dist_min.clone()
+
+    def compute_reach_reward(self):
+        """Compute reach reward - reward for reaching the target object."""
+        # max(d_closest - d, 0) d is between mean position for fingertips and target object
+        surface_offset = torch.tensor([0.0, 0.0, 0.125], device=self.device)
+        object_root_positions_with_offset = compute_offset_point_world(
+            self.object_root_positions,
+            self.object_root_orientations,
+            surface_offset
+        )
+        # self.fingertips_to_obj_dist = torch.mean(
+        #     self.fingertip_positions - object_root_positions_with_offset.unsqueeze(1), dim=1
+        # ).norm(dim=1)
+        self.fingertips_to_obj_dist = (self.index_fingertip_positions - object_root_positions_with_offset).norm(dim=1)
+        if not hasattr(self, "fingertips_to_obj_dist_min"):
+            self.fingertips_to_obj_dist_min = torch.ones_like(self.fingertips_to_obj_dist) * 0.3
+        self.reach_rew = torch.clip(self.fingertips_to_obj_dist_min - self.fingertips_to_obj_dist, min=0)
+        self.reach_rew_scaled = self.reach_rew * 50
+        self.extras["reach_rew"] = self.reach_rew_scaled.clone()
+        self.fingertips_to_obj_dist_min = torch.min(
+            self.fingertips_to_obj_dist_min, self.fingertips_to_obj_dist
+        )
+        self.extras["fingertips_to_obj_dist_min"] = self.fingertips_to_obj_dist_min.clone()
 
     def compute_pick_reward(self):
         """Compute pick reward - reward for picking the target object."""
@@ -3166,7 +3193,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         # elif "zheight" in self.reward_type and self.ur_control_type == "osc":
         #     self.height_rew_scaled = (
         #         satisfy_contact
-        #         * (1 + self.actions[:, self.arm_trans_action_indices[2]])
+        #         * (1 +compute_similarity_reward self.actions[:, self.arm_trans_action_indices[2]])
         #         * self.height_reward_scale
         #         * self.height_scale
         #     )
@@ -3183,7 +3210,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         )
         # print(self.goal_position_dist[0])
         if not hasattr(self, "goal_position_dist_min"):
-            self.goal_position_dist_min = torch.ones_like(self.goal_position_dist) * 1.0
+            self.goal_position_dist_min = torch.ones_like(self.goal_position_dist) * 0.40
         delta = self.goal_position_dist_min - self.goal_position_dist
         clipped_delta = torch.maximum(delta, torch.zeros_like(delta))
 
@@ -3193,8 +3220,9 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             self.picked.float() * clipped_delta * 250,
         ) * (self.y_displacement > 0.0).float()
         self.targ_rew_scaled = self.targ_rew * (1)
-        self.succ_rew = (self.goal_position_dist < 0.075).float() * self.reach_goal_bonus
+        self.succ_rew = (self.goal_position_dist_min <= 0.075).float() * self.reach_goal_bonus
         self.goal_position_dist_min = torch.min(self.goal_position_dist_min, self.goal_position_dist)
+        self.extras["succ_rew"] = self.succ_rew.clone()
         self.extras["targ_rew"] = self.targ_rew_scaled.clone()
         self.extras["goal_position_dist_min"] = self.goal_position_dist_min.clone()
 
@@ -3332,7 +3360,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
     def compute_neighbor_stability_penalty(self):
         """Compute neighboring object stability penalty - negative reward for moving non-target objects."""
         if self.non_occupied_object_indices.numel() == 0:
-            # No non-target objects, no penalty
+
             self.neighbor_stability_penalty = torch.zeros(
                 self.num_envs, device=self.device
             )
@@ -3341,19 +3369,9 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             )
             return
 
-        # Get current positions of all scene objects
-        current_positions = self.scene_object_root_positions  # (num_envs, num_objects_per_env, 3)
 
-        # Get initial positions from box grid generation (assume they start at grid positions)
-        initial_positions = torch.zeros_like(current_positions)
-        for env_idx in range(self.num_envs):
-            for obj_idx in range(self.num_objects_per_env):
-                # Use the original grid pose for each object
-                original_pose = self.gym_assets["current"]["objects"]["poses"][obj_idx]
-                initial_positions[env_idx, obj_idx] = torch.tensor(
-                    [original_pose.p.x, original_pose.p.y, original_pose.p.z],
-                    device=self.device
-                )
+        current_positions = self.scene_object_root_positions  # (num_envs, num_objects_per_env, 3)
+        initial_positions = self.scene_object_init_root_positions
 
         # Calculate displacement for all objects
         displacements = torch.norm(current_positions - initial_positions, dim=2)  # (num_envs, num_objects_per_env)
@@ -3525,7 +3543,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         #     self.extras["neighbor_displacement"] = self.neighbor_displacement.clone()
 
         self.rew_buf[:] = (
-            self.reach_rew_scaled + self.pick_rew_scaled + self.targ_rew_scaled
+            self.reach_rew_scaled + self.pick_rew_scaled + self.targ_rew_scaled + self.succ_rew
         )
 
         # Add singulation-specific rewards
@@ -4331,6 +4349,38 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         images = to_torch(images, device=self.device)
         return images
 
+def compute_offset_point_world(
+    obj_position: torch.Tensor,
+    obj_orientation: torch.Tensor,
+    local_offset: torch.Tensor,
+) -> torch.Tensor:
+    """Compute the global position of a point defined in an object's local frame.
+    
+    Args:
+        obj_position (torch.Tensor): Object's global position, shape (..., 3)
+        obj_orientation (torch.Tensor): Object's global orientation (quaternion), shape (..., 4)
+        local_offset (torch.Tensor): Offset in object's local frame, shape (3) or (..., 3)
+        
+    Returns:
+        torch.Tensor: Global position of the offset point, shape (..., 3)
+    """
+    # 确保所有输入具有兼容的形状
+    # 处理 local_offset 的广播
+    if local_offset.dim() == 1 and obj_position.dim() > 1:
+        # 如果 local_offset 是单个向量 (3,)，但 obj_position 是批次形式 (N, 3)
+        # 则扩展 local_offset 以匹配批次大小
+        local_offset = local_offset.expand_as(obj_position)
+    
+    # 处理 obj_orientation 的广播
+    if obj_orientation.shape != obj_position.shape[:-1] + (4,):
+        # 如果方向不是正确的形状，尝试广播
+        obj_orientation = obj_orientation.expand(*obj_position.shape[:-1], 4)
+    
+    # 应用物体的旋转到局部偏移量
+    rotated_offset = quat_apply(obj_orientation, local_offset)
+    
+    # 将旋转后的偏移量加到物体位置
+    return obj_position + rotated_offset
 
 def compute_relative_pose(
     a_orientation: torch.Tensor,

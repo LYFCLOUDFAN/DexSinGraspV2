@@ -71,7 +71,7 @@ class RunningMeanStd(nn.Module):
         return new_mean, new_var, new_count
 
     def forward(self, input, unnorm=False):
-        if self.training:
+        if self.training and input.size(0) > 1:
             mean = input.mean(self.axis)  # along channel axis
             var = input.var(self.axis)
             (
@@ -125,6 +125,9 @@ class RunningMeanStd(nn.Module):
             if self.norm_only:
                 y = input / torch.sqrt(current_var.float() + self.epsilon)
             else:
+                # print(input.shape)
+                # print(current_mean.shape)
+                # print(current_var.shape)
                 y = (input - current_mean.float()) / torch.sqrt(
                     current_var.float() + self.epsilon
                 )

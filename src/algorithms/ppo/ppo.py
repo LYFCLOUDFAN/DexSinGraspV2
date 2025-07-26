@@ -99,6 +99,7 @@ class PPO:
         self.step_size = learn_cfg["optim_stepsize"]
         self.init_noise_std = learn_cfg.get("init_noise_std", 0.3)
         self.normalize_input = learn_cfg["normalize_input"]
+        # self.normalize_input = True
         self.normalize_value = learn_cfg["normalize_value"]
         self.model_cfg = self.cfg_train["policy"]
         self.num_transitions_per_env = learn_cfg["nsteps"]
@@ -210,7 +211,8 @@ class PPO:
                 param.requires_grad = False
 
         self.optimizer = optim.Adam(
-            filter(lambda p: p.requires_grad, self.actor_critic.parameters()), lr=self.learning_rate
+            filter(lambda p: p.requires_grad, self.actor_critic.parameters()), lr=self.learning_rate, 
+            # eps=1e-5
         )
         """SDE."""
         if "gf" in self.vec_env.observation_info:
@@ -791,6 +793,11 @@ class PPO:
                 if self.apply_reset:
                     current_obs = self.vec_env.reset()["obs"]
                     current_states = self.vec_env.get_state()
+                    
+                if self.normalize_input:
+                    self.obs_running_mean_std.eval()
+                    # print(f"current_obs.shape: {current_obs.shape}")
+                    current_obs = self.obs_running_mean_std(current_obs)
 
                 # Compute the action
                 actions, actions_log_prob, values, mu, sigma, grad, storage_obs = self.compute_action(
@@ -849,6 +856,12 @@ class PPO:
             start = stop
             self.storage.compute_returns(last_values, self.gamma, self.lam)
 
+            if self.normalize_input:
+                raise NotImplementedError("Normalize input not work yet")
+                self.obs_running_mean_std.train()
+                flat_obs = self.storage.observations.view(-1, *self.storage.observations.shape[2:])
+                _ = self.obs_running_mean_std(flat_obs) 
+            
             if self.normalize_value:
                 self.value_running_mean_std.train()
                 all_values = self.storage.values.view(-1, 1)
@@ -990,15 +1003,11 @@ class PPO:
 
                 if self.normalize_input:
                     self.obs_running_mean_std.eval()
+                    # print(f"obs_batch.shape: {obs_batch.shape}")
+                    # print(self.obs_running_mean_std)
                     obs_batch = self.obs_running_mean_std(obs_batch)
 
-                (
-                    actions_log_prob_batch,
-                    entropy_batch,
-                    value_batch,
-                    mu_batch,
-                    sigma_batch,
-                ) = self.actor_critic.evaluate(obs_batch, states_batch, actions_batch)
+                actions_log_prob_batch, entropy_batch, value_batch, mu_batch, sigma_batch = self.actor_critic.evaluate(obs_batch, states_batch, actions_batch)
 
                 if self.normalize_value:
                     self.value_running_mean_std.eval()
@@ -1236,21 +1245,11 @@ class PPO:
         else:
             grad = torch.tensor([], device=self.device)
 
-        if self.normalize_input:
-            if mode == "train":
-                self.obs_running_mean_std.train()
-                normalized_current_obs = self.obs_running_mean_std(current_obs)
-            else:
-                self.obs_running_mean_std.eval()
-                normalized_current_obs = self.obs_running_mean_std(current_obs)
-        else:
-            normalized_current_obs = current_obs
-
         # pointnet fine-tuning
         if self.actor_critic.pcl_dim > 0 and self.pointnet_finetune:
-            batch_num = normalized_current_obs.size(0) // self.finetune_pointnet_bz + 1
+            batch_num = current_obs.size(0) // self.finetune_pointnet_bz + 1
             for batch_idx in range(batch_num):
-                obs_batch = normalized_current_obs[self.finetune_pointnet_bz * batch_idx : self.finetune_pointnet_bz * (batch_idx + 1)]
+                obs_batch = current_obs[self.finetune_pointnet_bz * batch_idx : self.finetune_pointnet_bz * (batch_idx + 1)]
 
                 if mode == "train":
                     actions_batch, actions_log_prob_batch, values_batch, mu_batch, sigma_batch = self.actor_critic.act(
@@ -1282,9 +1281,9 @@ class PPO:
                         actions = torch.cat([actions, actions_batch])
         else:
             if mode == "train":
-                actions, actions_log_prob, values, mu, sigma = self.actor_critic.act(normalized_current_obs, current_states)
+                actions, actions_log_prob, values, mu, sigma = self.actor_critic.act(current_obs, current_states)
             else:
-                actions = self.actor_critic.act_inference(normalized_current_obs)
+                actions = self.actor_critic.act_inference(current_obs)
 
         if mode == "train":
             # return original obs for storage

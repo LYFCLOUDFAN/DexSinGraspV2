@@ -105,7 +105,7 @@ def parse_hydra_config(
     # print config
     if show_cfg:
         print("\nIsaac Gym environment ({})".format(config.task.name))
-        print_cfg(omegaconf_to_dict(config.task))
+        print_cfg(omegaconf_to_dict(config))
 
     return config
 
@@ -142,4 +142,4 @@ def load_isaacgym_env(
 ) -> VecTask:
     config = parse_hydra_config(task_name=task_name, isaacgymenvs_path=isaacgymenvs_path, show_cfg=show_cfg, args=args)
     env = create_env_from_config(config)
-    return env
+    return env, config

@@ -59,8 +59,8 @@ multi_gpu: False
 
 wandb_activate: True
 wandb_group: ""
-wandb_name: ${train.params.config.name}
-wandb_entity: "ryqiao-east-china-normal-university"
+wandb_name: ${experiment}
+wandb_entity: ""
 wandb_project: "singulation-grasp"
 wandb_tags: []
 wandb_logcode_dir: ""
@@ -84,3 +84,12 @@ hydra:
   output_subdir: null
   run:
     dir: .
+  hydra_help:
+    hydra_help: false
+  sweep:
+    subdir: ""
+  job:
+    num: 0
+    id: ""
+  runtime:
+    output_dir: ""

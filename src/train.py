@@ -185,7 +185,6 @@ if __name__ == "__main__":
         cfg_train["learn"]["nminibatches"] = 4
         cfg_train["learn"]["desired_kl"] = 0.016
         cfg_train["learn"]["gamma"] = 0.99
-        cfg_train["learn"]["clip_range"] = 0.1
     elif args.exp_name == "ppo_real":
         # Check if using XArm Allegro task or Shadow Hand task
         if "task=XArmAllegroHandFunctionalManipulationUnderarm" in args.overrides:
@@ -213,7 +212,6 @@ if __name__ == "__main__":
         cfg_train["learn"]["nminibatches"] = 4
         cfg_train["learn"]["desired_kl"] = 0.016
         cfg_train["learn"]["gamma"] = 0.99
-        cfg_train["learn"]["clip_range"] = 0.1
     else:
         raise NotImplementedError(f"setting {args.exp_name} not supported")
     """
@@ -226,7 +224,7 @@ if __name__ == "__main__":
     args.overrides.append(f"obs_space={obs_space}")
     args.overrides.append(f"action_space={action_space}")
     # Load and wrap the Isaac Gym environment
-    env = load_isaacgym_env(
+    env, _ = load_isaacgym_env(
         task_name="", args=args
     )
     """

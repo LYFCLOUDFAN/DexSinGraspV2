@@ -130,7 +130,8 @@ assets/raw_models.tar.gz
 assets/ycb
 assets/shadow_robot/pcl_meshes
 assets/mjcf
-assets/urdf
+assets/urdf/ycb
+assets/urdf/ycb_assets
 assets/mano
 
 # Spyder project settings
