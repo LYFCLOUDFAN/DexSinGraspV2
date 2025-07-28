@@ -3514,7 +3514,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
     def compute_done(self, is_success):
         if not test_sim:
-            # if len(self.arm_roll_action_indices) == 0:
             if self.env_mode == "pgm":
                 fall_env_mask = (
                     (self.object_root_positions[:, 2] < self._table_pose[2] - 0.1)
@@ -3534,7 +3533,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
                 self.progress_buf = torch.where(is_success > 0, torch.zeros_like(self.progress_buf), self.progress_buf)
                 self.reset_buf = torch.where(self.successes >= self.max_consecutive_successes, 1, self.reset_buf)
 
-            self.reset_buf = torch.where(self.progress_buf >= self.scr - 1, 1, self.reset_buf)
+            self.reset_buf = torch.where(self.progress_buf >= self.max_episode_length - 1, 1, self.reset_buf)
             
             self.reset_buf[failed_env_ids] = 1
 
