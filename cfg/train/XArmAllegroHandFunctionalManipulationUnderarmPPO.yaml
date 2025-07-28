@@ -41,7 +41,7 @@ learn:
   # training params
   normalize_input: False
   normalize_value: False
-  cliprange: 0.2 #0.2
+  cliprange: 0.1 #0.2
   ent_coef: 0
   nsteps: 12
   noptepochs: 2 #2 5
@@ -52,7 +52,7 @@ learn:
   desired_kl: 0.016 #0.008 0.016
   gamma: 0.99 #0.99 0.96
   lam: 0.95
-  init_noise_std: 0.8 #0.8
+  init_noise_std: 1.0 #0.8
 
   log_interval: 1
   asymmetric: False

@@ -82,18 +82,22 @@ env:
   fallPenalty: 0.0
   curriculumMode: "no" # pose mode: set initial pose easy to reach; stage mode: set initial reward for pgm; set to no for evaluation
 
-  # Singulation-specific reward parameters
   tiltRewardScale: 1.0  # Reward for tilting object along x-axis (-45 degrees goal)
   slideRewardScale: 1.0  # Reward for sliding object forward along z-axis (20-30cm goal)
   neighborStabilityPenaltyScale: -5.0  # Penalty for moving non-target objects
   stabilityPenaltyScale: -2.0  # Penalty for unwanted Y/Z axis rotations (keep object stable)
 
-  # Goal pose parameters for singulation task
-  goalTranslationZ: 0.25  # 25cm forward along z-axis
-  goalRotationX: -0.80  # -45 degrees in radians around x-axis
-  goalTolerancePosition: 0.05  # 5cm tolerance for position
-  goalToleranceRotation: 0.087  # 5 degrees tolerance for rotation (in radians)
+  goalTranslationY: 0.05
+  goalRotationX: -0.80
+  goalTolerancePosition: 0.05
+  goalToleranceRotation: 0.087
 
+  # successTolerance: 0.075
+  # targetSuccessTolerance: 0.01
+  # toleranceCurriculumIncrement: 0.9  # multiplicative
+  # toleranceCurriculumInterval: 3000  # in env steps across all agents, with 8192 this is 3000 * 8192 = 24.6M env steps
+  # maxConsecutiveSuccesses: 50
+  successSteps: 30
   observationType: "full_state" # can be "openai", "full_no_vel", "full", "full_state"
 
   enableContactSensors: True
@@ -166,7 +170,7 @@ env:
   asymmetric_observations: False
   successTolerance: 0.1
   printNumSuccesses: False
-  maxConsecutiveSuccesses: 0
+  maxConsecutiveSuccesses: 50
 
   # set to True if you use camera sensors in the environment
   enableCameraSensors: False
