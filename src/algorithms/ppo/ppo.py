@@ -158,6 +158,9 @@ class PPO:
             in_pointnet_feature_dim=4,  # TODO
             args=args,
             stack_frame_number=self.vec_env.stack_frame_number,
+            actor_obs_normalization=self.normalize_input,
+            critic_obs_normalization=self.normalize_input,
+            obs_groups=None
         )
 
         # pointnet backbone
@@ -368,14 +371,6 @@ class PPO:
     def restore_test(self, path):
         checkpoint = torch.load(path)
         self.actor_critic.load_state_dict(checkpoint["model"])
-        if self.normalize_input:
-            self.obs_running_mean_std.load_state_dict(
-                checkpoint["obs_running_mean_std"]
-            )
-        if self.normalize_value:
-            self.value_running_mean_std.load_state_dict(
-                checkpoint["value_running_mean_std"]
-            )
         self.set_test()
 
     def restore_train(self, path):
@@ -385,10 +380,6 @@ class PPO:
         self.actor_critic.load_state_dict(checkpoint["model"])
         if self.args.con:
             self.current_learning_iteration = int(path.split("_")[-1].split(".")[0])
-        if self.normalize_input:
-            self.obs_running_mean_std.load_state_dict(
-                checkpoint["obs_running_mean_std"]
-            )
         self.set_train()
 
     def set_test(self, vis=False):
@@ -403,10 +394,6 @@ class PPO:
         weights = {
             "model": self.actor_critic.state_dict(),
         }
-        if self.normalize_input:
-            weights["obs_running_mean_std"] = self.obs_running_mean_std.state_dict()
-        if self.normalize_value:
-            weights["value_running_mean_std"] = self.value_running_mean_std.state_dict()
         torch.save(weights, path)
 
     def get_action(self, current_obs, mode):
@@ -793,11 +780,6 @@ class PPO:
                 if self.apply_reset:
                     current_obs = self.vec_env.reset()["obs"]
                     current_states = self.vec_env.get_state()
-                    
-                if self.normalize_input:
-                    self.obs_running_mean_std.eval()
-                    # print(f"current_obs.shape: {current_obs.shape}")
-                    current_obs = self.obs_running_mean_std(current_obs)
 
                 # Compute the action
                 actions, actions_log_prob, values, mu, sigma, grad, storage_obs = self.compute_action(
@@ -810,6 +792,8 @@ class PPO:
                     self.vec_env.action_gf = grad.clone()
                 next_obs, rews, dones, infos = self.vec_env.step(step_actions)
                 next_states = self.vec_env.get_state()
+                
+                self.actor_critic.update_normalization(next_obs["obs"])
 
                 rewards = rews.unsqueeze(-1)
 
@@ -855,17 +839,6 @@ class PPO:
             # Learning step
             start = stop
             self.storage.compute_returns(last_values, self.gamma, self.lam)
-
-            if self.normalize_input:
-                raise NotImplementedError("Normalize input not work yet")
-                self.obs_running_mean_std.train()
-                flat_obs = self.storage.observations.view(-1, *self.storage.observations.shape[2:])
-                _ = self.obs_running_mean_std(flat_obs) 
-            
-            if self.normalize_value:
-                self.value_running_mean_std.train()
-                all_values = self.storage.values.view(-1, 1)
-                _ = self.value_running_mean_std(all_values)
 
             mean_value_loss, mean_surrogate_loss = self.update()
             self.storage.clear()
@@ -1001,17 +974,7 @@ class PPO:
                     # demo_advantages_batch = self.demo_storage.advantages.view(-1, 1)[indices]
                     # demo_old_actions_log_prob_batch = self.demo_storage.actions_log_prob.view(-1, 1)[indices]
 
-                if self.normalize_input:
-                    self.obs_running_mean_std.eval()
-                    # print(f"obs_batch.shape: {obs_batch.shape}")
-                    # print(self.obs_running_mean_std)
-                    obs_batch = self.obs_running_mean_std(obs_batch)
-
                 actions_log_prob_batch, entropy_batch, value_batch, mu_batch, sigma_batch = self.actor_critic.evaluate(obs_batch, states_batch, actions_batch)
-
-                if self.normalize_value:
-                    self.value_running_mean_std.eval()
-                    value_batch = self.value_running_mean_std(value_batch)
 
                 if self.args.exp_name == "ilad":
                     """Evaulate demo."""

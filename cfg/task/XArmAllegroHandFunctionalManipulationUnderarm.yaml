@@ -74,7 +74,7 @@ env:
   armActionPenaltyScale: -0.01
   similarityRewardScale: 1.0
   similarityRewardFreq: 1.0
-  reachGoalBonus: 800
+  reachGoalBonus: 1600
   heightScale: 0.0
   timeStepPenatly: -0.0
   manipulabilityPenaltyScale: 1.0
@@ -97,7 +97,7 @@ env:
   # toleranceCurriculumIncrement: 0.9  # multiplicative
   # toleranceCurriculumInterval: 3000  # in env steps across all agents, with 8192 this is 3000 * 8192 = 24.6M env steps
   # maxConsecutiveSuccesses: 50
-  successSteps: 30
+  successSteps: 60
   observationType: "full_state" # can be "openai", "full_no_vel", "full", "full_state"
 
   enableContactSensors: True
@@ -170,7 +170,7 @@ env:
   asymmetric_observations: False
   successTolerance: 0.1
   printNumSuccesses: False
-  maxConsecutiveSuccesses: 50
+  maxConsecutiveSuccesses: 100
 
   # set to True if you use camera sensors in the environment
   enableCameraSensors: False

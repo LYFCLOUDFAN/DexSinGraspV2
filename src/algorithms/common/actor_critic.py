@@ -3,10 +3,11 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.distributions import MultivariateNormal
+from torch.distributions import MultivariateNormal, Normal, Independent
 import math
 
 # from networks.pointnet import PointNetEncoder
+from algorithms.common.normalization import EmpiricalNormalization
 from tasks.isaacgym_utils import pack_pointcloud_observations
 
 fuse_type = "concat" # concat or sep
@@ -41,6 +42,9 @@ class ActorCritic(nn.Module):
         hand_model=None,
         args=None,
         stack_frame_number=1,
+        actor_obs_normalization=False,
+        critic_obs_normalization=False,
+        obs_groups=None,
     ):
         super(ActorCritic, self).__init__()
 
@@ -48,6 +52,9 @@ class ActorCritic(nn.Module):
         self.asymmetric = asymmetric
         self.pointnet_type = pointnet_type
         self.in_pointnet_feature_dim = in_pointnet_feature_dim
+
+        self.obs_groups = obs_groups
+        
         """Get network input output dim."""
         # retrival observation dim for input
         self.state_dim = 0
@@ -74,6 +81,15 @@ class ActorCritic(nn.Module):
         print(f"  - pcl_dim: {self.pcl_dim}")
         print(f"  - grad_dim: {self.grad_dim}")
         self.observation_info = observation_info
+
+        if obs_groups is not None:
+            num_actor_obs = self.state_dim + self.tactile_dim + self.grad_dim
+            if self.pcl_dim > 0:
+                num_actor_obs += model_cfg.get("pcl_feature_dim", 512)
+            num_critic_obs = num_actor_obs
+        else:
+            num_actor_obs = obs_shape[0] if isinstance(obs_shape, (list, tuple)) else obs_shape
+            num_critic_obs = num_actor_obs
 
         # retrival action dim
         self.action_dim = actions_shape[0]
@@ -122,6 +138,14 @@ class ActorCritic(nn.Module):
         self.actor_output = self.build_block(
             actor_hidden_dim, self.action_dim, activation, [], activate_for_last_layer=False
         )
+        
+        # Actor observation normalization
+        self.actor_obs_normalization = actor_obs_normalization
+        if actor_obs_normalization:
+            self.actor_obs_normalizer = EmpiricalNormalization(num_actor_obs)
+        else:
+            self.actor_obs_normalizer = torch.nn.Identity()
+            
         """Critic layer."""
         # state encoder
         critic_state_encoder_hid_sizes = model_cfg["vf_state_encoder_hid_sizes"]
@@ -156,6 +180,13 @@ class ActorCritic(nn.Module):
 
         # mlp output
         self.critic_output = self.build_block(critic_hidden_dim, 1, activation, [], activate_for_last_layer=False)
+        
+        # Critic observation normalization
+        self.critic_obs_normalization = critic_obs_normalization
+        if critic_obs_normalization:
+            self.critic_obs_normalizer = EmpiricalNormalization(num_critic_obs)
+        else:
+            self.critic_obs_normalizer = torch.nn.Identity()
 
         if self.pcl_dim > 0:
             """Shared layer."""
@@ -191,7 +222,6 @@ class ActorCritic(nn.Module):
         ]
 
     def _initialize_weights(self):
-
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 if getattr(m, 'bias', None) is not None:
@@ -223,6 +253,7 @@ class ActorCritic(nn.Module):
         if hasattr(self, 'critic_fuse'):
             self.init_weights(self.critic_fuse, [np.sqrt(2)] * len(self.critic_fuse))
 
+
         actor_output_linear = [m for m in self.actor_output if isinstance(m, nn.Linear)]
         if actor_output_linear:
             torch.nn.init.orthogonal_(actor_output_linear[-1].weight, gain=0.01)  # type: ignore
@@ -231,7 +262,7 @@ class ActorCritic(nn.Module):
         if critic_output_linear:
             torch.nn.init.orthogonal_(critic_output_linear[-1].weight, gain=1.0)  # type: ignore
 
-        # ILAD
+        # Additional critic for ILAD
         if hasattr(self, 'additional_critic_mlp1'):
             additional_critic_linear = [m for m in self.additional_critic_mlp1 if isinstance(m, nn.Linear)]
             if additional_critic_linear:
@@ -451,11 +482,17 @@ class ActorCritic(nn.Module):
         return state_batch, tactile_batch, pcl_batch, gf_batch
 
     def act(self, observations: torch.Tensor, states: Optional[torch.Tensor] = None):
+
+        if self.actor_obs_normalization:
+            observations = self.actor_obs_normalizer(observations)
+            
         actions_mean = self.forward_actor(observations)
 
         # print(self.log_std)
         covariance = torch.diag(self.log_std.exp() * self.log_std.exp())
         distribution = MultivariateNormal(actions_mean, scale_tril=covariance)
+        
+        # distribution = Independent(Normal(actions_mean, self.log_std.exp()), 1)
 
         actions = distribution.sample()
         actions_log_prob = distribution.log_prob(actions)
@@ -463,7 +500,10 @@ class ActorCritic(nn.Module):
         if self.asymmetric:
             value = self.critic(states)
         else:
-            value = self.forward_critic(observations)
+            critic_observations = observations
+            if self.critic_obs_normalization:
+                critic_observations = self.critic_obs_normalizer(observations)
+            value = self.forward_critic(critic_observations)
 
         return (
             actions.detach(),
@@ -474,23 +514,40 @@ class ActorCritic(nn.Module):
         )
 
     def cal_actions_log_prob(self, observations: torch.Tensor, actions: torch.Tensor):
+
+        if self.actor_obs_normalization:
+            observations = self.actor_obs_normalizer(observations)
+            
         actions_mean = self.forward_actor(observations)
 
         covariance = torch.diag(self.log_std.exp() * self.log_std.exp())
         distribution = MultivariateNormal(actions_mean, scale_tril=covariance)
+        # distribution = Independent(Normal(actions_mean, self.log_std.exp()), 1)
 
         actions_log_prob = distribution.log_prob(actions)
         return actions.detach(), actions_log_prob.detach(), actions_mean.detach()
 
     def act_inference(self, observations: torch.Tensor) -> torch.Tensor:
+
+        if self.actor_obs_normalization:
+            observations = self.actor_obs_normalizer(observations)
+            
         actions_mean = self.forward_actor(observations)
         return actions_mean
 
     def evaluate(self, observations, states, actions):
-        actions_mean = self.forward_actor(observations)
+
+        if self.actor_obs_normalization:
+            actor_observations = self.actor_obs_normalizer(observations)
+        else:
+            actor_observations = observations
+            
+        actions_mean = self.forward_actor(actor_observations)
 
         covariance = torch.diag(self.log_std.exp() * self.log_std.exp())
         distribution = MultivariateNormal(actions_mean, scale_tril=covariance)
+        
+        # distribution = Independent(Normal(actions_mean, self.log_std.exp()), 1)
 
         actions_log_prob = distribution.log_prob(actions)
         entropy = distribution.entropy()
@@ -498,9 +555,43 @@ class ActorCritic(nn.Module):
         if self.asymmetric:
             value = self.critic(states)
         else:
-            value = self.forward_critic(observations)
+            if self.critic_obs_normalization:
+                critic_observations = self.critic_obs_normalizer(observations)
+            else:
+                critic_observations = observations
+            value = self.forward_critic(critic_observations)
 
         return actions_log_prob, entropy, value, actions_mean, self.log_std.repeat(actions_mean.shape[0], 1)
+
+
+    def get_actor_obs(self, obs):
+        """Get actor observations. Compatible with both old and new observation formats."""
+        if self.obs_groups is not None and isinstance(obs, dict):
+            obs_list = []
+            for obs_group in self.obs_groups["policy"]:
+                obs_list.append(obs[obs_group])
+            return torch.cat(obs_list, dim=-1)
+        else:
+            return obs
+
+    def get_critic_obs(self, obs):
+        """Get critic observations. Compatible with both old and new observation formats."""
+        if self.obs_groups is not None and isinstance(obs, dict):
+            obs_list = []
+            for obs_group in self.obs_groups["critic"]:
+                obs_list.append(obs[obs_group])
+            return torch.cat(obs_list, dim=-1)
+        else:
+            return obs
+
+    def update_normalization(self, obs):
+        """Update observation normalization statistics."""
+        if self.actor_obs_normalization:
+            actor_obs = self.get_actor_obs(obs)
+            self.actor_obs_normalizer.update(actor_obs)
+        if self.critic_obs_normalization:
+            critic_obs = self.get_critic_obs(obs)
+            self.critic_obs_normalizer.update(critic_obs)
 
 
 def get_activation(act_name):
