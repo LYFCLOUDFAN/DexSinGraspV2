@@ -489,10 +489,10 @@ class ActorCritic(nn.Module):
         actions_mean = self.forward_actor(observations)
 
         # print(self.log_std)
-        covariance = torch.diag(self.log_std.exp() * self.log_std.exp())
-        distribution = MultivariateNormal(actions_mean, scale_tril=covariance)
+        # covariance = torch.diag(self.log_std.exp() * self.log_std.exp())
+        # distribution = MultivariateNormal(actions_mean, scale_tril=covariance)
         
-        # distribution = Independent(Normal(actions_mean, self.log_std.exp()), 1)
+        distribution = Independent(Normal(actions_mean, self.log_std.exp()), 1)
 
         actions = distribution.sample()
         actions_log_prob = distribution.log_prob(actions)
@@ -520,9 +520,9 @@ class ActorCritic(nn.Module):
             
         actions_mean = self.forward_actor(observations)
 
-        covariance = torch.diag(self.log_std.exp() * self.log_std.exp())
-        distribution = MultivariateNormal(actions_mean, scale_tril=covariance)
-        # distribution = Independent(Normal(actions_mean, self.log_std.exp()), 1)
+        # covariance = torch.diag(self.log_std.exp() * self.log_std.exp())
+        # distribution = MultivariateNormal(actions_mean, scale_tril=covariance)
+        distribution = Independent(Normal(actions_mean, self.log_std.exp()), 1)
 
         actions_log_prob = distribution.log_prob(actions)
         return actions.detach(), actions_log_prob.detach(), actions_mean.detach()
@@ -544,10 +544,10 @@ class ActorCritic(nn.Module):
             
         actions_mean = self.forward_actor(actor_observations)
 
-        covariance = torch.diag(self.log_std.exp() * self.log_std.exp())
-        distribution = MultivariateNormal(actions_mean, scale_tril=covariance)
+        # covariance = torch.diag(self.log_std.exp() * self.log_std.exp())
+        # distribution = MultivariateNormal(actions_mean, scale_tril=covariance)
         
-        # distribution = Independent(Normal(actions_mean, self.log_std.exp()), 1)
+        distribution = Independent(Normal(actions_mean, self.log_std.exp()), 1)
 
         actions_log_prob = distribution.log_prob(actions)
         entropy = distribution.entropy()

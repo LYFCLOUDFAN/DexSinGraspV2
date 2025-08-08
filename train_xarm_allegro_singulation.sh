@@ -20,9 +20,10 @@ python src/train.py \
     sim_device=cuda:0 \
     rl_device=cuda:0 \
     physics_engine=physx \
-    --seed=0 \
+    --seed=42 \
     --exp_name='PPO' \
     --logdir='xarm_allegro_singulation_ppo' \
+    --run_device_id=0 \
     --run_device_id=0 \
     --web_visualizer_port=-1
     # task.env.enableDebugVis=True \

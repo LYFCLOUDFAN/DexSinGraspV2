@@ -431,6 +431,16 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.slide_reward_scale = self.cfg["env"].get("slideRewardScale", 1.0)
         self.neighbor_stability_penalty_scale = self.cfg["env"].get("neighborStabilityPenaltyScale", -5.0)
         self.stability_penalty_scale = self.cfg["env"].get("stabilityPenaltyScale", -2.0)
+        
+        # self.neighbor_pos_penalty_scale = 25.0
+        # self.neighbor_rot_penalty_scale = 10.0
+        self.neighbor_pos_penalty_scale = .0
+        self.neighbor_rot_penalty_scale = .0
+        self.safety_distance_sigma = 0.15
+        self.pos_disturbance_threshold = 0.002
+        self.rot_disturbance_threshold = 0.05
+        self.contact_penalty_scale = self.cfg["env"].get("contactPenaltyScale", 10.0)
+        self.contact_force_threshold = self.cfg["env"].get("contactForceThreshold", 0.5)
 
         # Goal pose parameters for singulation task
         self.goal_translation_y = self.cfg["env"]["goalTranslationY"]
@@ -587,6 +597,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         # non-target object
         self.max_non_targets = self.num_objects_per_env - 1  # Maximum possible non-target objects per env
         self.k_nearest = min(self.num_nearest_non_targets, self.max_non_targets)
+        
+
 
         # TODO: define structure to hold all the indices
         # mapping from name to asset instance
@@ -746,7 +758,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.nearest_non_target_object_orientations = torch.zeros((self.num_envs, self.num_nearest_non_targets, 4), device=self.device)
 
 
-
         # Intermediate tensors for _refresh_sim_tensors
         self._target_positions = torch.zeros((self.num_envs, 3), device=self.device)
         self._gather_indices_pos = torch.zeros((self.num_envs, self.max_non_targets, 3), dtype=torch.long, device=self.device)
@@ -770,6 +781,9 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.allegro_hand_net_contact_forces = net_contact_forces[
             :, self.allegro_hand_rigid_body_start : self.allegro_hand_rigid_body_end, :
         ]
+        # self.surr_object_net_contact_forces = net_contact_forces[
+        #     :, self.surr_object_indices, :
+        # ]
 
         # allocate buffers to hold intermediate results
 
@@ -1196,6 +1210,13 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         net_contact_forces = self.net_contact_forces.view(self.num_envs, self.num_rigid_bodies, 3)
         self.arm_contact_forces = net_contact_forces[:, self.arm_link_indices, :]
         self.hand_contact_forces = net_contact_forces[:, self.hand_link_indices, :]
+        
+
+        # Target object contact forces [num_envs, 3]
+        self.target_object_contact_forces = self.net_contact_forces[self.target_object_rigid_body_indices, :].view(self.num_envs, 3)
+        
+        # Surrounding objects contact forces [num_envs, max_surr_objects, 3]
+        self.surr_object_contact_forces = self.net_contact_forces[self.surr_object_rigid_body_indices.flatten(), :].view(self.num_envs, self.max_non_targets, 3)
 
         self.fingertip_states = self.allegro_hand_rigid_body_states[:, self.fingertip_indices, :]
         self.fingertip_positions = self.fingertip_states[..., 0:3]
@@ -2599,6 +2620,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             allegro_hand_indices.append(actor_index)
 
             poses = self.gym_assets["current"]["objects"]["poses"]
+            surr_obj_cur_idx = 0
             for k in range(self.num_objects_per_env):
                 is_target = (k == occupied_object_indices_per_env[i])
                 cfg = self.gym_assets["current"]["objects"]["warehouse"]["targ_obj"][k % len(self.gym_assets["current"]["objects"]["warehouse"]["targ_obj"])] if is_target else self.gym_assets["current"]["objects"]["warehouse"]["surr_obj"][k % len(self.gym_assets["current"]["objects"]["warehouse"]["surr_obj"])]
@@ -2610,7 +2632,9 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
                 if is_target:
                     actor_index = self.__create_sim_actor(env, cfg, i, "targ_obj", pose, color=targ_obj_color)
                 else:
-                    actor_index = self.__create_sim_actor(env, cfg, i, f"sur_obj_{k}", pose, color=surr_obj_color)
+                    surr_obj_name = f"sur_obj_{surr_obj_cur_idx}"
+                    surr_obj_cur_idx += 1
+                    actor_index = self.__create_sim_actor(env, cfg, i, surr_obj_name, pose, color=surr_obj_color)
 
 
                 object_indices[i].append(actor_index)
@@ -2695,7 +2719,30 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         allegro_hand = self.gym.find_actor_handle(env, "allegro_hand")
         self.allegro_hand_index = self.gym.get_actor_index(env, allegro_hand, gymapi.DOMAIN_ENV)
-
+        
+        # Object Rigid Body Index Tracking
+        self.target_object_rigid_body_indices = torch.zeros((num_envs,), dtype=torch.long, device=self.device)
+        self.surr_object_rigid_body_indices = torch.zeros((num_envs, self.max_non_targets), dtype=torch.long, device=self.device)
+        
+        for i in range(num_envs):
+            env = self.envs[i]
+            
+            # Get target object rigid body index
+            target_obj_handle = self.gym.find_actor_handle(env, "targ_obj")
+            target_object_actor = self.gym.get_actor_index(env, target_obj_handle, gymapi.DOMAIN_ENV)
+            target_rb_index = self.gym.get_actor_rigid_body_index(
+                env, target_object_actor, 0, gymapi.DOMAIN_SIM
+            )
+            self.target_object_rigid_body_indices[i] = target_rb_index
+            
+            # Get surrounding object rigid body indices surr_object_indices to [env_id, max_non_targets]
+            for j in range(self.max_non_targets):
+                surr_obj_handle = self.gym.find_actor_handle(env, f"sur_obj_{j}")
+                surr_object_actor = self.gym.get_actor_index(env, surr_obj_handle, gymapi.DOMAIN_ENV)
+                surr_rb_index = self.gym.get_actor_rigid_body_index(
+                    env, surr_object_actor, 0, gymapi.DOMAIN_SIM
+                )
+                self.surr_object_rigid_body_indices[i, j] = surr_rb_index
 
         # define start and end indices for allegro hand DOFs to create contiguous slices
         self.allegro_hand_dof_start = self.gym.get_actor_dof_index(env, allegro_hand, 0, gymapi.DOMAIN_ENV)
@@ -3244,7 +3291,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         newly_picked = ~self.picked & picked
         newly_picked_bonus = newly_picked * 350
 
-        self.pick_rew = torch.clip((1 - picked.float()) * self.delta_obj_height * 20, min=-0.1) + newly_picked_bonus
+        self.pick_rew = torch.clip((1 - picked.float()) * self.delta_obj_height * 20, min=0) + newly_picked_bonus
         
         self.pick_rew = self.pick_rew * (self.y_displacement > 0.0).float()
         
@@ -3451,58 +3498,107 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         pos_diff = self.surr_object_root_positions - self.prev_surr_object_root_positions
         pos_displacement_per_object = torch.norm(pos_diff, dim=2, p=2)
-        total_neighbor_pos_displacement = torch.sum(pos_displacement_per_object, dim=1)
+        target_pos = self.object_root_positions  # [num_envs, 3] 
+        surr_pos = self.surr_object_root_positions  # [num_envs, num_surr_objects, 3]
         
-        # self.neighbor_pos_penalty = -total_neighbor_pos_displacement
-        # self.neighbor_pos_penalty_scaled = self.neighbor_pos_penalty * self.neighbor_pos_penalty_scale
-        self.extras["neighbor_pos_displacement"] = total_neighbor_pos_displacement.clone()
-        # self.extras["total_neighbor_pos_displacement"] = total_neighbor_pos_displacement.clone()
+        distances_to_target = torch.norm(
+            surr_pos - target_pos.unsqueeze(1), dim=2, p=2
+        )  # [num_envs, num_surr_objects]
+        
+        sigma = 0.15  
+        distance_weights = torch.exp(-distances_to_target ** 2 / (2 * sigma ** 2))
+        
+        pos_threshold = 0.002  
+        significant_displacement = torch.clamp(
+            pos_displacement_per_object - pos_threshold, min=0.0
+        )
+        
+        weighted_pos_penalty_per_object = distance_weights * significant_displacement
+        total_pos_penalty = torch.sum(weighted_pos_penalty_per_object, dim=1)  # [num_envs]
+        
+        self.neighbor_pos_penalty_scale = getattr(self, 'neighbor_pos_penalty_scale', 50.0)  # 默认缩放
+        self.neighbor_pos_penalty = total_pos_penalty
+        self.neighbor_pos_penalty_scaled = self.neighbor_pos_penalty * self.neighbor_pos_penalty_scale
+        
+        self.extras["neighbor_pos_penalty"] = self.neighbor_pos_penalty_scaled.clone()
+        self.extras["neighbor_pos_displacement"] = torch.sum(pos_displacement_per_object, dim=1).clone()
+        self.extras["avg_distance_to_target"] = torch.mean(distances_to_target, dim=1).clone()
     
     def compute_neighbor_rot_penalty(self):
         rot_diff_per_object_rad = quat_diff_rad_normalized(self.surr_object_root_orientations, self.prev_surr_object_root_orientations)
         
-        # normalize to [0, pi]
-        # rot_diff_per_object_rad = torch.abs(rot_diff_per_object_rad)
-        # rot_diff_per_object_rad = torch.where(rot_diff_per_object_rad >= torch.pi, 2 * torch.pi - rot_diff_per_object_rad, rot_diff_per_object_rad)
-        total_neighbor_rot_diff_rad = torch.sum(rot_diff_per_object_rad, dim=1)
+        target_pos = self.object_root_positions
+        surr_pos = self.surr_object_root_positions
+        distances_to_target = torch.norm(
+            surr_pos - target_pos.unsqueeze(1), dim=2, p=2
+        )
         
-        # self.neighbor_rot_penalty = -total_neighbor_rot_diff_rad
+        sigma = 0.15  
+        distance_weights = torch.exp(-distances_to_target ** 2 / (2 * sigma ** 2))
         
-        # self.neighbor_rot_penalty_scaled = self.neighbor_rot_penalty * self.neighbor_rot_penalty_scale
+        rot_threshold = 0.05  # ~3
+        significant_rotation = torch.clamp(
+            rot_diff_per_object_rad - rot_threshold, min=0.0
+        )
         
-        self.extras["neighbor_rot_diff_rad"] = total_neighbor_rot_diff_rad.clone()
+        weighted_rot_penalty_per_object = distance_weights * significant_rotation
+        total_rot_penalty = torch.sum(weighted_rot_penalty_per_object, dim=1)
         
+        self.neighbor_rot_penalty_scale = getattr(self, 'neighbor_rot_penalty_scale', 20.0)
+        self.neighbor_rot_penalty = total_rot_penalty
+        self.neighbor_rot_penalty_scaled = self.neighbor_rot_penalty * self.neighbor_rot_penalty_scale
+        
+        self.extras["neighbor_rot_penalty"] = self.neighbor_rot_penalty_scaled.clone()
+        self.extras["neighbor_rot_diff_rad"] = torch.sum(rot_diff_per_object_rad, dim=1).clone()
+        
+    def compute_contact_based_safety_penalty(self):
+        """Compute safety penalty based on contact forces - more immediate than displacement"""
+        
+        surr_contact_magnitudes = torch.clamp(torch.norm(self.surr_object_contact_forces, dim=2, p=2), max=300.0) 
 
+        target_pos = self.object_root_positions
+        surr_pos = self.surr_object_root_positions
+        distances_to_target = torch.norm(surr_pos - target_pos.unsqueeze(1), dim=2, p=2)
+        
+        sigma = 0.15
+        distance_weights = torch.exp(-distances_to_target ** 2 / (2 * sigma ** 2))
+        
+        # Contact force threshold (ignore small contact forces)
+        contact_threshold = 1
+        significant_contacts_mask = (surr_contact_magnitudes - contact_threshold) > 0.0
+        weighted_contact_penalty = distance_weights * significant_contacts_mask.float() * surr_contact_magnitudes
+        total_contact_penalty = -(1 - torch.exp(torch.max(weighted_contact_penalty, dim=1).values / 50))
 
-        self.extras["neighbor_stability_penalty"] = self.neighbor_stability_penalty_scaled.clone()
-        self.extras["total_non_target_displacement"] = total_non_target_displacement.clone()
-    
-        self.extras["neighbor_stability_penalty"] = self.neighbor_stability_penalty_scaled.clone()
-        self.extras["total_non_target_displacement"] = total_non_target_displacement.clone()
+        self.contact_penalty_scale = getattr(self, 'contact_penalty_scale', 10.0)
+        self.contact_safety_penalty = total_contact_penalty * self.contact_penalty_scale
+        # print(f"total_contact_penalty: {torch.max(self.contact_safety_penalty)}")
+        
+        # Debug
+        self.extras["contact_safety_penalty"] = self.contact_safety_penalty.clone()
+        self.extras["total_surr_contact_force"] = torch.sum(surr_contact_magnitudes, dim=1).clone()
+        self.extras["target_contact_force"] = torch.norm(self.target_object_contact_forces, dim=1, p=2).clone()
 
-    def compute_stability_penalty(self):
-        """Compute penalty for unwanted Y and Z axis rotations (keep object stable in those dimensions)."""
-        from .torch_utils import get_euler_xyz
-        current_euler = torch.stack(get_euler_xyz(self.object_root_orientations), dim=1)
+    def compute_safety_penalty(self):
 
-        y_rotation = current_euler[:, 1]  # Y-axis rotation (pitch)
-        z_rotation = current_euler[:, 2]  # Z-axis rotation (yaw)
-
-        y_rotation_normalized = torch.atan2(torch.sin(y_rotation), torch.cos(y_rotation))
-        z_rotation_normalized = torch.atan2(torch.sin(z_rotation), torch.cos(z_rotation))
-
-        y_rotation_error = torch.abs(y_rotation_normalized)
-        z_rotation_error = torch.abs(z_rotation_normalized)
-
-        total_rotation_error = y_rotation_error + z_rotation_error
-        self.stability_penalty_scaled = total_rotation_error * self.stability_penalty_scale
-
-        self.y_rotation_error = y_rotation_error
-        self.z_rotation_error = z_rotation_error
-        self.y_rotation_normalized = y_rotation_normalized
-        self.z_rotation_normalized = z_rotation_normalized
-
-        self.extras["stability_penalty"] = self.stability_penalty_scaled.clone()
+        self.compute_neighbor_pos_penalty()
+        self.compute_neighbor_rot_penalty()
+        self.compute_contact_based_safety_penalty()
+        total_safety_penalty = (
+            self.neighbor_pos_penalty_scaled + 
+            self.neighbor_rot_penalty_scaled + 
+            self.contact_safety_penalty
+        )
+        
+        extreme_threshold = 0.1
+        extreme_penalty = torch.where(
+            self.neighbor_pos_penalty > extreme_threshold,
+            100.0,
+            0.0
+        )
+        
+        self.safety_penalty = total_safety_penalty
+        self.extras["safety_penalty"] = self.safety_penalty.clone()
+        self.extras["extreme_disturbance"] = (self.neighbor_pos_penalty > extreme_threshold).float().clone()
 
     def compute_singulation_success_reward(self):
         """Compute success reward based on reaching the goal pose (position + rotation)."""
@@ -3604,6 +3700,14 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.rew_buf[:] = (
             self.reach_rew_scaled + self.pick_rew_scaled + self.targ_rew_scaled + bonus_rew
         )
+        self.task_reward = self.rew_buf.clone()
+        
+        self.compute_safety_penalty()
+        
+        self.rew_buf[:] = self.task_reward - self.safety_penalty
+        
+        self.extras["task_reward"] = self.task_reward.clone()
+        self.extras["safety_ratio"] = (self.safety_penalty / (torch.abs(self.task_reward) + 1e-6)).clone()
 
         # Add singulation-specific rewards
         if "tilt" in self.reward_type:
@@ -3821,7 +3925,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         #     occupied_object_init_root_orientation = random_orientation(num_reset_envs, self.device)
 
         # For singulation task, use nominal orientation (no rotation) for all boxes
-        occupied_object_init_root_orientation = torch.tensor(self._object_nominal_orientation, device=self.device).repeat(num_reset_envs, 1)
+        occupied_object_init_root_orientation = self._object_nominal_orientation.clone().detach().repeat(num_reset_envs, 1)
 
         # Compute statastics of object pointclouds
         pointclouds_wrt_world = quat_rotate(occupied_object_init_root_orientation[:, None, :], pointclouds)

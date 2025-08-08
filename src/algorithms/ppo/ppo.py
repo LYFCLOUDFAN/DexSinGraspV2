@@ -97,9 +97,8 @@ class PPO:
         self.desired_kl = learn_cfg.get("desired_kl", None)
         self.schedule = learn_cfg.get("schedule", "fixed")
         self.step_size = learn_cfg["optim_stepsize"]
-        self.init_noise_std = learn_cfg.get("init_noise_std", 0.3)
+        self.init_noise_std = learn_cfg["init_noise_std"]
         self.normalize_input = learn_cfg["normalize_input"]
-        # self.normalize_input = True
         self.normalize_value = learn_cfg["normalize_value"]
         self.model_cfg = self.cfg_train["policy"]
         self.num_transitions_per_env = learn_cfg["nsteps"]
@@ -323,7 +322,8 @@ class PPO:
             label_type = self.vec_env.label_paths[0]
 
         if log_dir == "":
-            pass
+            self.writer = None
+            self.log_dir = None
         else:
             self.log_dir = f"./logs/{args.exp_name}/{time_now}_{log_dir}_objtype:{object_type}_labeltype:{label_type}_objnum:{self.vec_env.num_objects}_objcat:{self.vec_env.object_cat}_maxpercat:{self.vec_env.max_per_cat}_geo:{self.vec_env.object_geo_level}_scale:{self.vec_env.object_scale}_envnum:{self.vec_env.num_envs}_rewtype:{self.vec_env.reward_type}_seed{args.seed}"
 
@@ -393,6 +393,9 @@ class PPO:
     def save(self, path):
         weights = {
             "model": self.actor_critic.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "iteration": self.current_learning_iteration,
+            "tot_timesteps": self.tot_timesteps,
         }
         torch.save(weights, path)
 
@@ -757,8 +760,9 @@ class PPO:
             print(f"eval_rewards: {eval_rews}")
             print(f"eval_eps_len: {np.mean(eps_len_all)}")
             print(f"eval_succ_eps_len: {np.mean(succ_eps_len_all)}")
-            self.writer.add_scalar("Eval/success_rate", sr_mu, it)
-            self.writer.add_scalar("Eval/eval_rews", eval_rews, it)
+            if self.writer is not None:
+                self.writer.add_scalar("Eval/success_rate", sr_mu, it)
+                self.writer.add_scalar("Eval/eval_rews", eval_rews, it)
 
     def train(self, num_learning_iterations, log_interval=1):
         # rewbuffer = deque(maxlen=100)
@@ -840,7 +844,7 @@ class PPO:
             start = stop
             self.storage.compute_returns(last_values, self.gamma, self.lam)
 
-            mean_value_loss, mean_surrogate_loss = self.update()
+            mean_value_loss, mean_surrogate_loss, mean_kl_loss = self.update()
             self.storage.clear()
             stop = time.time()
             learn_time = stop - start
@@ -850,7 +854,8 @@ class PPO:
                 self.set_test()
                 self.eval(it + 1)
                 self.set_train()
-                self.save(os.path.join(self.log_dir, "model_{}.pt".format(it + 1)))
+                if self.log_dir is not None:
+                    self.save(os.path.join(self.log_dir, "model_{}.pt".format(it + 1)))
 
                 current_obs = self.vec_env.reset()["obs"]
                 current_states = self.vec_env.get_state()
@@ -872,25 +877,28 @@ class PPO:
                     infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
                 if key == "success_num":
                     value = torch.sum(infotensor)
-                    self.writer.add_scalar("Episode/" + "total_success_num", value, locs["it"])
+                    if self.writer is not None:
+                        self.writer.add_scalar("Episode/" + "total_success_num", value, locs["it"])
                     ep_string += f"""{f'Total episode {key}:':>{pad}} {value:.4f}\n"""
                 value = torch.mean(infotensor)
-                self.writer.add_scalar("Episode/" + key, value, locs["it"])
+                if self.writer is not None:
+                    self.writer.add_scalar("Episode/" + key, value, locs["it"])
                 ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
         mean_std = self.actor_critic.log_std.exp().mean()
+        
+        if self.writer is not None:
+            self.writer.add_scalar("Loss/value_function", locs["mean_value_loss"], locs["it"])
+            self.writer.add_scalar("Loss/surrogate", locs["mean_surrogate_loss"], locs["it"])
+            self.writer.add_scalar("Loss/kl", locs["mean_kl_loss"], locs["it"])
+            self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
 
-        self.writer.add_scalar("Loss/value_function", locs["mean_value_loss"], locs["it"])
-        self.writer.add_scalar("Loss/surrogate", locs["mean_surrogate_loss"], locs["it"])
-        self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
-
-        if self.print_log:
             self.writer.add_scalar("Train/mean_reward", self.episode_rewards.get_mean(), locs["it"])
             self.writer.add_scalar("Train/mean_episode_length", self.episode_lengths.get_mean(), locs["it"])
             self.writer.add_scalar("Train/mean_reward/time", self.episode_rewards.get_mean(), self.tot_time)
             self.writer.add_scalar("Train/mean_episode_length/time",self.episode_lengths.get_mean(),self.tot_time,)
-
-        self.writer.add_scalar("Train2/mean_reward/step", locs["mean_reward"], locs["it"])
-        self.writer.add_scalar("Train2/mean_episode_length/episode", locs["mean_trajectory_length"], locs["it"])
+        
+            self.writer.add_scalar("Train2/mean_reward/step", locs["mean_reward"], locs["it"])
+            self.writer.add_scalar("Train2/mean_episode_length/episode", locs["mean_trajectory_length"], locs["it"])
 
         fps = int(self.num_transitions_per_env * self.vec_env.num_envs / (locs["collection_time"] + locs["learn_time"]))
 
@@ -937,6 +945,7 @@ class PPO:
     def update(self):
         mean_value_loss = 0
         mean_surrogate_loss = 0
+        mean_kl_loss = 0
 
         batch = self.storage.mini_batch_generator(self.num_mini_batches)
 
@@ -1063,12 +1072,14 @@ class PPO:
 
                 mean_value_loss += value_loss.item()
                 mean_surrogate_loss += surrogate_loss.item()
+                mean_kl_loss += kl_mean.item()
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
+        mean_kl_loss /= num_updates
 
-        return mean_value_loss, mean_surrogate_loss
+        return mean_value_loss, mean_surrogate_loss, mean_kl_loss
 
     """
     ILAD

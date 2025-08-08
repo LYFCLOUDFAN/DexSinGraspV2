@@ -18,13 +18,15 @@ python src/train.py \
     task.env.datasetPoseLevelSampling=True \
     sim_device=cpu \
     rl_device=cpu \
+    reward_type=succrew+tilt+slide+neighbor+actionpen \
     physics_engine=physx \
     --vis_env_num=2 \
-    --seed=0 \
+    --seed=42 \
     --exp_name='PPO' \
     --test \
     --eval_times=5 \
-    --logdir="logs/PPO/07-15-21-03_xarm_allegro_singulation_ppo_objtype:all_labeltype:box_grid_singulation_objnum:5_objcat:box_maxpercat:-1_geo:all_scale:all_envnum:16_rewtype:succrew+rotrew+actionpen+mutual+fjcontact_seed0/" \
+    --logdir="" \
     --run_device_id=-1 \
     --web_visualizer_port=-1 \
-    --model_dir="logs/PPO/07-23-04-03_xarm_allegro_singulation_ppo_objtype:all_labeltype:box_grid_singulation_objnum:5_objcat:box_maxpercat:-1_geo:all_scale:all_envnum:4096_rewtype:succrew+tilt+slide+neighbor+actionpen_seed0/model_5000.pt"
+    --resume_iter=29000 \
+    --model_dir="/home/ruoyi/Work/UniDexFPM/logs/PPO/08-07-04-07_xarm_allegro_singulation_ppo_safety_finetune_5e-1_objtype:all_labeltype:box_grid_singulation_objnum:5_objcat:box_maxpercat:-1_geo:all_scale:all_envnum:4096_rewtype:succrew+tilt+slide+neighbor+actionpen_seed42"

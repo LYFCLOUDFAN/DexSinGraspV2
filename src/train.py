@@ -17,6 +17,27 @@ from utils.config import get_args, load_cfg
 
 # from utils.vis import Visualizer # use visualizer requires to install sim-web-visualizer
 
+def list_available_checkpoints(model_dir):
+    import glob
+    import re
+    
+    if not os.path.isdir(model_dir):
+        return []
+    
+    checkpoint_pattern = os.path.join(model_dir, "model_*.pt")
+    checkpoint_files = glob.glob(checkpoint_pattern)
+    
+    iterations = []
+    for file_path in checkpoint_files:
+        filename = os.path.basename(file_path)
+        match = re.match(r"model_(\d+)\.pt", filename)
+        if match:
+            iterations.append(int(match.group(1)))
+            
+    checkpoints_path = [os.path.join(model_dir, f"model_{iter}.pt") for iter in sorted(iterations)]
+    
+    return checkpoints_path, sorted(iterations)
+
 if __name__ == "__main__":
     set_np_formatting()
 
@@ -35,6 +56,8 @@ if __name__ == "__main__":
     parser.add_argument("--collect_demo_num", type=int, default=-1, help="collect demo num")
     parser.add_argument("--eval_times", type=int, default=5, help="Eval times for each object")
     parser.add_argument("--max_iterations", type=int, default=-1, help="Max iterations for training")
+    parser.add_argument("--resume_iter", type=int, default=None, help="Resume from specific iteration (default: latest)")
+    parser.add_argument("--list_checkpoints", action="store_true", default=False, help="List available checkpoints and exit")
 
     parser.add_argument("--cfg_train",type=str,default="XArmAllegroHandFunctionalManipulationUnderarmPPO",help="Training config")
 
@@ -235,8 +258,15 @@ if __name__ == "__main__":
         learn_cfg["test"] = True
     is_testing = learn_cfg["test"]
     # Override resume and testing flags if they are passed as parameters.
-    if args.model_dir != "":
-        chkpt_path = args.model_dir
+    if args.con or learn_cfg["test"]:
+        if args.model_dir is None or args.model_dir == "":
+            raise ValueError("model_dir is required when con is True")
+        checkpoints_path, iterations = list_available_checkpoints(args.model_dir)
+        if args.resume_iter is not None:
+            chkpt_path = checkpoints_path[iterations.index(args.resume_iter)]
+        else:
+            chkpt_path = checkpoints_path[-1]
+        print(f"Loading checkpoint from {chkpt_path} at iteration {args.resume_iter if args.resume_iter is not None else iterations[-1]}")
 
     runner = PPO(
         vec_env=env,

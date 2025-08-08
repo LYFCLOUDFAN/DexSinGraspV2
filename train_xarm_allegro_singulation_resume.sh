@@ -22,8 +22,10 @@ python src/train.py \
     physics_engine=physx \
     --seed=42 \
     --exp_name='PPO' \
-    --logdir='xarm_allegro_singulation_ppo' \
-    --model_dir='logs/PPO/07-24-03-48_xarm_allegro_singulation_ppo_objtype:all_labeltype:box_grid_singulation_objnum:5_objcat:box_maxpercat:-1_geo:all_scale:all_envnum:4096_rewtype:succrew+tilt+slide+neighbor+actionpen_seed0/model_18000.pt' \
+    --logdir='xarm_allegro_singulation_ppo_safety_finetune_1e1_400_clip' \
+    --model_dir='/home/ruoyi/Work/UniDexFPM/logs/PPO/08-07-04-07_xarm_allegro_singulation_ppo_objtype:all_labeltype:box_grid_singulation_objnum:5_objcat:box_maxpercat:-1_geo:all_scale:all_envnum:4096_rewtype:succrew+tilt+slide+neighbor+actionpen_seed42' \
+    --resume_iter=20000 \
+    --con \
     --run_device_id=0 \
     --run_device_id=0 \
     --web_visualizer_port=-1

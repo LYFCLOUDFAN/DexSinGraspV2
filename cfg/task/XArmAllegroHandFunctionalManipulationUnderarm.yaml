@@ -31,6 +31,7 @@ env:
   dofSpeedScale: 20.0
   actionsMovingAverage: 1.0
   controlFrequencyInv: 2 # 30 Hz
+  # controlFrequencyInv: 6 # 10 Hz
 
   startPositionNoise: 0.01
   startRotationNoise: 0.0
