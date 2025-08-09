@@ -1,11 +1,4 @@
 import os
-# print("DEBUG ENV:", os.getenv("debug"))
-# if os.getenv("debug") != "":
-#     import debugpy
-
-#     debugpy.listen(("localhost", 9999))
-#     print("Waiting for debugger attach")
-#     debugpy.wait_for_client()
 
 import isaacgym
 from hydra._internal.utils import get_args_parser
@@ -155,22 +148,6 @@ if __name__ == "__main__":
                     "action",
                 ]
                 action_space = ["wrist_translation", "wrist_rotation", "hand_rotation"]
-            elif "task=FloatingFingertipManipulation" in args.overrides:
-                obs_space = [
-                    # Floating Fingertip state
-                    "floating_fingertip_dof_position",
-                    "floating_fingertip_dof_velocity",
-                    # Object state (current target object)
-                    "object_position",
-                    "object_orientation",
-                    "object_linear_velocity",
-                    "object_angular_velocity",
-                    "nearest_non_target_object_position",
-                    "nearest_non_target_object_orientation",
-                    # Scene understanding
-                    "object_bbox",
-                ]
-                action_space = ["floating_fingertip_dof"]
             else:
                 # Default Shadow Hand configuration
                 obs_space = [

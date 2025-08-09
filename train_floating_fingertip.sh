@@ -13,8 +13,8 @@ python src/train.py \
     graphics_device_id=0 \
     split='train' \
     cluster=0 \
-    task=XArmAllegroHandFunctionalManipulationUnderarm \
-    train=XArmAllegroHandFunctionalManipulationUnderarmPPO \
+    task=FloatingFingertipManipulation \
+    train=FloatingFingertipManipulationPPO \
     task.env.enableContactSensors=False \
     reward_type=succrew+tilt+slide+neighbor+actionpen \
     sim_device=cuda:0 \
@@ -22,7 +22,7 @@ python src/train.py \
     physics_engine=physx \
     --seed=0 \
     --exp_name='PPO' \
-    --logdir='xarm_allegro_singulation_ppo' \
+    --logdir='floating_fingertip_singulation_ppo' \
     --run_device_id=0 \
     --web_visualizer_port=-1
     # task.env.enableDebugVis=True \

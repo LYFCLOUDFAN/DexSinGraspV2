@@ -66,8 +66,8 @@ add_noise = False
 STATIC_TARGET = False
 
 
-class XArmAllegroHandUnderarmDimensions(enum.Enum):
-    """Dimension constants for Isaac Gym with xArm6 + Allegro Hand."""
+class FloatingFingertipManipulationDimensions(enum.Enum):
+    """Dimension constants for Isaac Gym with Floating Fingertip."""
 
     # general state
     # cartesian position (3) + quaternion orientation (4)
@@ -79,15 +79,7 @@ class XArmAllegroHandUnderarmDimensions(enum.Enum):
     # force (3) + torque (3)
     WRENCH_DIM = 6
 
-    NUM_FINGERTIPS = 4  # Allegro hand has 4 fingertips
-    NUM_DOFS = 22  # xArm6 (6 DOF) + Allegro hand (16 DOF)
-
-    WRIST_TRAN = 3
-    WRIST_ROT = 3
-
-    # Allegro hand actuated dimensions
-    HAND_ACTUATED_DIM = 16
-
+    NUM_DOFS = 6  # prismatic (3) + revolute (3)
 
 class ForceSensorSpec:
     name: str
@@ -145,120 +137,15 @@ class AggregateTracker:
         self.aggregate_shapes += shapes
 
 
-class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
+class FloatingFingertipManipulation(VecTask):
     # constants
     _asset_root: os.PathLike = os.path.join(os.path.dirname(find_dotenv()), "assets/urdf")
     _data_root: os.PathLike = os.path.join(os.path.dirname(find_dotenv()), "data")
-    _allegro_hand_right_asset_file: os.PathLike = os.path.join("hands", "allegro_hand", "allegro_hand_right.urdf")
-    _allegro_hand_left_asset_file: os.PathLike = os.path.join("hands", "allegro_hand", "allegro_hand_left.urdf")
-    _xarm_allegro_hand_right_asset_file: str = "xarm6_allegro_right.urdf"
-    _xarm_allegro_hand_left_asset_file: str = "xarm6_allegro_left.urdf"
+    _floating_fingertip_urdf: str = "floating_fingertip.urdf"
 
-    # fmt: off
-    _xarm_dof_names: List[str] = [
-        "joint1", "joint2", "joint3", "joint4", "joint5", "joint6",
-    ]
-
-    # Allegro hand DOF names (16 DOF total)
-    _allegro_hand_dof_names: List[str] = [
-        "joint_0.0", "joint_1.0", "joint_2.0", "joint_3.0",  # finger 0 (index)
-        "joint_4.0", "joint_5.0", "joint_6.0", "joint_7.0",  # finger 1 (middle)
-        "joint_8.0", "joint_9.0", "joint_10.0", "joint_11.0",  # finger 2 (ring)
-        "joint_12.0", "joint_13.0", "joint_14.0", "joint_15.0",  # thumb
-    ]
-
-    # Group allegro hand DOF names by finger
-    _allegro_finger0_dof_names: List[str] = ["joint_0.0", "joint_1.0", "joint_2.0", "joint_3.0"]
-    _allegro_finger1_dof_names: List[str] = ["joint_4.0", "joint_5.0", "joint_6.0", "joint_7.0"]
-    _allegro_finger2_dof_names: List[str] = ["joint_8.0", "joint_9.0", "joint_10.0", "joint_11.0"]
-    _allegro_thumb_dof_names: List[str] = ["joint_12.0", "joint_13.0", "joint_14.0", "joint_15.0"]
-
-    _allegro_fingers_dof_names: List[str] = (
-        _allegro_finger0_dof_names + _allegro_finger1_dof_names + _allegro_finger2_dof_names
-    )
-    _allegro_digits_dof_names: List[str] = _allegro_fingers_dof_names + _allegro_thumb_dof_names
-    # fmt: on
-
-    _arm_links: List[str] = ["link_base", "link1", "link2", "link3", "link4", "link5", "link6"]
-    _hand_links: List[str] = [
-        "base_link", "palm", "wrist",
-        "link_0.0", "link_1.0", "link_2.0", "link_3.0",
-        "link_4.0", "link_5.0", "link_6.0", "link_7.0",
-        "link_8.0", "link_9.0", "link_10.0", "link_11.0",
-        "link_12.0", "link_13.0", "link_14.0", "link_15.0",
-    ]
-    _fingertips: List[str] = ["link_3.0_tip", "link_7.0_tip", "link_11.0_tip", "link_15.0_tip"]
-    _allegro_hand_center_prim: str = "base_link"
-    _allegro_hand_palm_prim: str = "palm"
-    # fmt: off
-    _keypoints: List[str] = [
-        # "palm",
-        "link_12.0", "link_13.0", "link_14.0", "link_15.0_tip",  # thumb
-        "link_0.0", "link_1.0", "link_2.0", "link_3.0_tip",     # finger 0 (index)
-        "link_4.0", "link_5.0", "link_6.0", "link_7.0_tip",     # finger 1 (middle)
-        "link_8.0", "link_9.0", "link_10.0", "link_11.0_tip",   # finger 2 (ring)
-    ]
-    # fmt: on
-
-    _xarm_right_init_dof_positions: Dict[str, float] = {
-        "joint1": 0.0,
-        "joint2": -1.0,
-        "joint3": -0.5,
-        "joint4": 0.0,
-        "joint5": 0.0,
-        "joint6": 0.0,
-    }
-    _xarm_left_init_dof_positions: Dict[str, float] = {
-        "joint1": 0.0,
-        "joint2": -1.0,
-        "joint3": -0.5,
-        "joint4": 0.0,
-        "joint5": 0.0,
-        "joint6": 0.0,
-    }
-    allegro_hand_init_dof_positions: Dict[str, float] = {
-        "joint_0.0": -0.14,
-        "joint_1.0": 1.0,
-        "joint_2.0": 1.8,
-        "joint_3.0": 0.9,
-        "joint_4.0": 0.0,
-        "joint_5.0": 0.0,
-        "joint_6.0": 0.15,
-        "joint_7.0": 0.29,
-        "joint_8.0": 0.38,
-        "joint_9.0": 1.3,
-        "joint_10.0": 1.4,
-        "joint_11.0": 1.0,
-        "joint_12.0": 0.46,
-        "joint_13.0": 0.08,
-        "joint_14.0": 1.0,
-        "joint_15.0": 0.53,
-    }
-    allegro_hand_init_dof_positions: Dict[str, float] = {
-        "joint_0.0": 0,
-        "joint_1.0": 0.0,
-        "joint_2.0": 0,
-        "joint_3.0": 0,
-        "joint_4.0": 0.0,
-        "joint_5.0": 0.0,
-        "joint_6.0": 0,
-        "joint_7.0": 0,
-        "joint_8.0": 0,
-        "joint_9.0": 0,
-        "joint_10.0": 0,
-        "joint_11.0": 0,
-        "joint_12.0": 0,
-        "joint_13.0": 0.0,
-        "joint_14.0": 0,
-        "joint_15.0": 0.0,
-    }
-
-    _xarm_right_init_position = [0.00, 0.65, 0.00]
-    _xarm_right_init_orientation = [0.0, 0.0, -np.sqrt(0.5), np.sqrt(0.5)]
-    _allegro_hand_predef_qpos = [0] * 16  # reset if use predef qpos
-    _target_hand_palm_pose = [-0.4, 0.053, 0.810, 0.0, -0.707, 0.707, 0.0]
-    _current_hand_palm_pose = [0.021, 0.052, 0.608, 0.0, -0.707, 0.707, 0.0]
-    _hand_geo_center = [0.0, 0.0, 0.0]
+    _floating_fingertip_init_position = [0.00, 0.00, 0.00]
+    _floating_fingertip_init_orientation = [0.0, 0.0, 0.0, 1.0]
+    _floating_fingertip_predef_qpos = [0] * 6  # reset if use predef qpos
     _object_z = 0.5
     _object_nominal_orientation = [0.0, 0.0, 1.0, 0.0]
     _table_x_length = 0.5
@@ -266,34 +153,28 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
     _table_thickness = 0.02
     _table_pose = [0.0, 0.0, 0.4]
 
-    _max_xarm_endeffector_pos_vel = 1.0
-    _max_xarm_endeffector_rot_vel = torch.pi
+    _max_floating_fingertip_pos_vel = 1.0
+    _max_floating_fingertip_rot_vel = torch.pi
 
-    _palm2forearm_quat = [0.0, 0.0, 0.0, 1.0]
-    _palm2forearm_pos = [0.0, -0.01, 0.247]
-
-    _dims = XArmAllegroHandUnderarmDimensions
+    _dims = FloatingFingertipManipulationDimensions
     _observation_specs: Sequence[ObservationSpec] = []
     _action_specs: Sequence[ActionSpec] = []
     _force_sensor_specs: Sequence[ForceSensorSpec] = [
-        ForceSensorSpec("link_3.0_tip", "link_3.0_tip"),
-        ForceSensorSpec("link_7.0_tip", "link_7.0_tip"),
-        ForceSensorSpec("link_11.0_tip", "link_11.0_tip"),
-        ForceSensorSpec("link_15.0_tip", "link_15.0_tip"),
+        ForceSensorSpec("joint_tip", "link_3.0_tip"),
     ]
 
     # TODO: add description about tensor shapes
-    allegro_hand_index: int
+    floating_fingertip_index: int
 
-    allegro_hand_dof_lower_limits: Tensor
-    allegro_hand_dof_upper_limits: Tensor
-    allegro_hand_dof_init_positions: Tensor
-    allegro_hand_dof_init_velocities: Tensor
+    floating_fingertip_dof_lower_limits: Tensor
+    floating_fingertip_dof_upper_limits: Tensor
+    floating_fingertip_dof_init_positions: Tensor
+    floating_fingertip_dof_init_velocities: Tensor
 
-    allegro_hand_dof_start: int
-    allegro_hand_dof_end: int
-    target_allegro_hand_dof_start: int
-    target_allegro_hand_dof_end: int
+    floating_fingertip_dof_start: int
+    floating_fingertip_dof_end: int
+    target_floating_fingertip_dof_start: int
+    target_floating_fingertip_dof_end: int
 
     # buffers to hold intermediate results
     root_states: Tensor
@@ -302,11 +183,11 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
     root_linear_velocities: Tensor
     root_angular_velocities: Tensor
 
-    allegro_hand_root_states: Tensor
-    allegro_hand_root_positions: Tensor
-    allegro_hand_root_orientations: Tensor
-    allegro_hand_root_linear_velocities: Tensor
-    allegro_hand_root_angular_velocities: Tensor
+    floating_fingertip_root_states: Tensor
+    floating_fingertip_root_positions: Tensor
+    floating_fingertip_root_orientations: Tensor
+    floating_fingertip_root_linear_velocities: Tensor
+    floating_fingertip_root_angular_velocities: Tensor
 
     scene_object_root_states: Tensor
     scene_object_root_positions: Tensor
@@ -314,11 +195,11 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
     scene_object_root_linear_velocities: Tensor
     scene_object_root_angular_velocities: Tensor
 
-    allegro_hand_dof_positions: Tensor
-    allegro_hand_dof_velocities: Tensor
+    floating_fingertip_dof_positions: Tensor
+    floating_fingertip_dof_velocities: Tensor
 
-    target_allegro_hand_dof_positions: Tensor
-    target_allegro_hand_dof_velocities: Tensor
+    target_floating_fingertip_dof_positions: Tensor
+    target_floating_fingertip_dof_velocities: Tensor
 
     # tensors need to be refreshed manually
     fingertip_states: Tensor
@@ -332,8 +213,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
     object_root_states: Tensor
     object_root_positions: Tensor
     object_root_orientations: Tensor
-    object_positions_wrt_palm: Tensor
-    object_orientations_wrt_palm: Tensor
 
     prev_targets: Tensor
     curr_targets: Tensor
@@ -371,18 +250,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.dof_speed_scale = self.cfg["env"]["dofSpeedScale"]
         self.use_relative_control = self.cfg["env"]["useRelativeControl"]
         self.act_moving_average = self.cfg["env"]["actionsMovingAverage"]
-
-        self.enable_contact_sensors = self.cfg["env"]["enableContactSensors"] or self.cfg["env"]["tactileObs"]
-        self.contact_sensor_fingertip_only = self.cfg["env"]["contactSensorFingertipOnly"]
-        self.contact_sensor_fingertip_from_all = self.cfg["env"]["contactSensorFingertipFromAll"]
-        self.contact_sensor_threshold = self.cfg["env"]["contactSensorThreshold"]
-
-        # Section for functional grasping dataset
-        # self.dataset_dir = self.cfg["env"]["datasetDir"]
-        # self.dataset_metainfo_path = self.cfg["env"]["datasetMetainfoPath"]
-        # self.dataset_skipcode_path = self.cfg["env"]["datasetSkipcodePath"]
-        # self.dataset_pose_level_sampling = self.cfg["env"]["datasetPoseLevelSampling"]
-        # self.dataset_queries = self.cfg["env"]["datasetQueries"]
 
         self.object_spacing = self.cfg["env"]["objectSpacing"]
         self.num_objects = self.cfg["env"]["numObjects"]
@@ -436,11 +303,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.goal_tolerance_position = self.cfg["env"].get("goalTolerancePosition", 0.05)
         self.goal_tolerance_rotation = self.cfg["env"].get("goalToleranceRotation", 0.087)  # 5 degrees
 
-
-
         self.debug_viz = self.cfg["env"]["enableDebugVis"]
         self.env_info_logging = self.cfg["logging"]["envInfo"]
-
 
         self.max_episode_length = self.cfg["env"]["episodeLength"]
         self.reset_time = self.cfg["env"].get("resetTime", -1.0)
@@ -507,52 +371,49 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             # self.cfg["env"]["actionSpace"] = ["hand_rotation", "wrist_3_joint"]
             self.object_targets = torch.zeros(self.cfg["env"]["numEnvs"], 4, device=sim_device)
             # if "wrist_3_joint" not in self.cfg["env"]["actionSpace"]:
-            self._xarm_right_init_dof_positions = {
-                "joint1": 0.0,
-                "joint2":-1.0,
-                "joint3":-0.5,
-                "joint4": 0.0,
-                "joint5": 0.0,
-                "joint6": 0.0,
+            self._floating_fingertip_init_dof_positions = {
+                "prismatic_x": 0.0,
+                "prismatic_y": 0.0,
+                "prismatic_z": 0.0,
+                "revolute_x": 0.0,
+                "revolute_y": 0.0,
+                "revolute_z": 0.0,
             }
         elif self.env_mode == "relpose":
             # self.cfg["env"]["actionSpace"] = ["hand_rotation"]
             self.object_targets = torch.zeros(self.cfg["env"]["numEnvs"], 3 + 4, device=sim_device)
             # if "wrist_3_joint" not in self.cfg["env"]["actionSpace"]:
-            self._xarm_right_init_dof_positions = {
-                "joint1": 0.0,
-                "joint2":-1.0,
-                "joint3":-0.5,
-                "joint4": 0.0,
-                "joint5": 0.0,
-                "joint6": 0.0,
+            self._floating_fingertip_init_dof_positions = {
+                "prismatic_x": 0.0,
+                "prismatic_y": 0.0,
+                "prismatic_z": 0.0,
+                "revolute_x": 0.0,
+                "revolute_y": 0.0,
+                "revolute_z": 0.0,
             }
         elif self.env_mode == "relposecontact":
             # self.cfg["env"]["actionSpace"] = ["hand_rotation"]
             self.object_targets = torch.zeros(self.cfg["env"]["numEnvs"], 3 + 4 + 18, device=sim_device)
             # if "wrist_3_joint" not in self.cfg["env"]["actionSpace"]:
-            self._xarm_right_init_dof_positions = {
-                "joint1": 0.0,
-                "joint2":-1,
-                "joint3":-0.5,
-                "joint4": 0.0,
-                "joint5": 0.0,
-                "joint6": 0.0,
+            self._floating_fingertip_init_dof_positions = {
+                "prismatic_x": 0.0,
+                "prismatic_y": 0.0,
+                "prismatic_z": 0.0,
+                "revolute_x": 0.0,
+                "revolute_y": 0.0,
+                "revolute_z": 0.0,
             }
         elif self.env_mode == "pgm":
             self.object_targets = torch.zeros(self.cfg["env"]["numEnvs"], 3 + 4 + 18, device=sim_device)
-            self._xarm_right_init_dof_positions = {
-                "joint1": 0.0,
-                "joint2":-1,
-                "joint3":-0.5,
-                "joint4": 0.0,
-                "joint5": 0.0,
-                "joint6": 0.0,
+            self._floating_fingertip_init_dof_positions = {
+                "prismatic_x": 0.0,
+                "prismatic_y": 0.0,
+                "prismatic_z": 0.0,
+                "revolute_x": 0.0,
+                "revolute_y": 0.0,
+                "revolute_z": 0.0,
             }
-            self._hand_geo_center = [0, 0, 0]
             self._object_z = 0.01 + self._table_thickness / 2
-            self._current_hand_palm_pose = [0.02, 0.3, 0.6, 0.707, 0.0, 0.0, 0.707]
-            self.ur_control_type = "osc"
 
             if self.relative_part_reward:
                 self.prev_pos_dist = torch.ones(self.cfg["env"]["numEnvs"], device=sim_device) * -1
@@ -588,8 +449,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.gym_assets["current"] = {}
         self.gym_assets["target"] = {}
 
-        self.num_fingertips = len(self._fingertips)
-
         # self.__create_functional_grasping_dataset(device=sim_device)
         self.__create_box_grid_dataset(device=sim_device)
         self.__configure_mdp_spaces()
@@ -623,7 +482,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         # - force_sensor_states: [num_envs * num_force_sensors, 6]
         _force_sensor_states: torch.Tensor = self.gym.acquire_force_sensor_tensor(self.sim)
         # - jacobians: [num_envs, num_prims - 1, 6, num_dofs]
-        _jacobians: torch.Tensor = self.gym.acquire_jacobian_tensor(self.sim, "allegro_hand")
+        _jacobians: torch.Tensor = self.gym.acquire_jacobian_tensor(self.sim, "floating_fingertip")
 
         if self.env_info_logging:
             print("root_states.shape: ", _root_states.shape)
@@ -680,11 +539,11 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         root_states = self.root_states.view(self.num_envs, self.num_actors, 13)
 
-        self.allegro_hand_root_states = root_states[:, self.allegro_hand_index, :]
-        self.allegro_hand_root_positions = self.allegro_hand_root_states[:, 0:3]
-        self.allegro_hand_root_orientations = self.allegro_hand_root_states[:, 3:7]
-        self.allegro_hand_root_linear_velocities = self.allegro_hand_root_states[:, 7:10]
-        self.allegro_hand_root_angular_velocities = self.allegro_hand_root_states[:, 10:13]
+        self.floating_fingertip_root_states = root_states[:, self.floating_fingertip_index, :]
+        self.floating_fingertip_root_positions = self.floating_fingertip_root_states[:, 0:3]
+        self.floating_fingertip_root_orientations = self.floating_fingertip_root_states[:, 3:7]
+        self.floating_fingertip_root_linear_velocities = self.floating_fingertip_root_states[:, 7:10]
+        self.floating_fingertip_root_angular_velocities = self.floating_fingertip_root_states[:, 10:13]
 
         self.scene_object_root_positions = self.root_positions[self.object_indices, :].view(self.num_envs, self.num_objects_per_env, 3)
         self.scene_object_root_orientations = self.root_orientations[self.object_indices, :].view(self.num_envs, self.num_objects_per_env, 4)
@@ -696,33 +555,19 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         dof_states = self.dof_states.view(self.num_envs, self.num_dofs, 2)
 
-        self.allegro_hand_dof_positions = dof_states[:, self.allegro_hand_dof_start : self.allegro_hand_dof_end, 0]
-        self.allegro_hand_dof_velocities = dof_states[:, self.allegro_hand_dof_start : self.allegro_hand_dof_end, 1]
+        self.floating_fingertip_dof_positions = dof_states[:, self.floating_fingertip_dof_start : self.floating_fingertip_dof_end, 0]
+        self.floating_fingertip_dof_velocities = dof_states[:, self.floating_fingertip_dof_start : self.floating_fingertip_dof_end, 1]
 
 
         rigid_body_states = self.rigid_body_states.view(self.num_envs, self.num_rigid_bodies, 13)
 
-        self.allegro_hand_rigid_body_states = rigid_body_states[
-            :, self.allegro_hand_rigid_body_start : self.allegro_hand_rigid_body_end, :
+        self.floating_fingertip_rigid_body_states = rigid_body_states[
+            :, self.floating_fingertip_rigid_body_start : self.floating_fingertip_rigid_body_end, :
         ]
-        self.allegro_hand_rigid_body_positions = self.allegro_hand_rigid_body_states[..., 0:3]
-        self.allegro_hand_rigid_body_orientations = self.allegro_hand_rigid_body_states[..., 3:7]
-        self.allegro_hand_rigid_body_linear_velocities = self.allegro_hand_rigid_body_states[..., 7:10]
-        self.allegro_hand_rigid_body_angular_velocities = self.allegro_hand_rigid_body_states[..., 10:13]
-
-        self.allegro_hand_center_states = self.allegro_hand_rigid_body_states[:, self.allegro_center_index, :]
-        self.allegro_hand_center_positions = self.allegro_hand_center_states[:, 0:3]
-        self.allegro_hand_center_orientations = self.allegro_hand_center_states[:, 3:7]
-
-
-        endeffector_index = self.gym.find_asset_rigid_body_index(
-            self.gym_assets["current"]["robot"]["asset"], "link6"
-        )
-        self.endeffector_states = self.allegro_hand_rigid_body_states[:, endeffector_index, :]
-        self.endeffector_positions = self.allegro_hand_rigid_body_positions[:, endeffector_index, :]
-        self.endeffector_orientations = self.allegro_hand_rigid_body_orientations[:, endeffector_index, :]
-        self.endeffector_linear_velocities = self.allegro_hand_rigid_body_linear_velocities[:, endeffector_index, :]
-        self.endeffector_angular_velocities = self.allegro_hand_rigid_body_angular_velocities[:, endeffector_index, :]
+        self.floating_fingertip_rigid_body_positions = self.floating_fingertip_rigid_body_states[..., 0:3]
+        self.floating_fingertip_rigid_body_orientations = self.floating_fingertip_rigid_body_states[..., 3:7]
+        self.floating_fingertip_rigid_body_linear_velocities = self.floating_fingertip_rigid_body_states[..., 7:10]
+        self.floating_fingertip_rigid_body_angular_velocities = self.floating_fingertip_rigid_body_states[..., 10:13]
 
         self.nearest_non_target_object_positions = torch.zeros((self.num_envs, self.num_nearest_non_targets, 3), device=self.device)
         self.nearest_non_target_object_orientations = torch.zeros((self.num_envs, self.num_nearest_non_targets, 4), device=self.device)
@@ -751,8 +596,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         net_contact_forces = self.net_contact_forces.view(self.num_envs, self.num_rigid_bodies, 3)
 
-        self.allegro_hand_net_contact_forces = net_contact_forces[
-            :, self.allegro_hand_rigid_body_start : self.allegro_hand_rigid_body_end, :
+        self.floating_fingertip_net_contact_forces = net_contact_forces[
+            :, self.floating_fingertip_rigid_body_start : self.floating_fingertip_rigid_body_end, :
         ]
 
         # allocate buffers to hold intermediate results
@@ -761,10 +606,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         kwargs = {"dtype": torch.float, "device": self.device}
         self._r_target_object_root_positions = torch.zeros((self.num_envs, 3), **kwargs)
         self._r_target_object_root_orientations = torch.zeros((self.num_envs, 4), **kwargs)
-        self._r_target_allegro_dof_positions = torch.zeros((self.num_envs, 22), **kwargs)  # 6 arm + 16 hand
-        self._r_target_allegro_digits_actuated_dof_positions = torch.zeros((self.num_envs, 16), **kwargs)  # 16 Allegro hand DOF
-        self._r_target_allegro_fingers_actuated_dof_positions = torch.zeros((self.num_envs, 12), **kwargs)  # 3 fingers × 4 DOF
-        self._r_target_allegro_thumb_actuated_dof_positions = torch.zeros((self.num_envs, 4), **kwargs)  # 4 thumb DOF
+        self._r_target_floating_fingertip_dof_positions = torch.zeros((self.num_envs, 6), **kwargs)
         self._r_target_object_positions_wrt_palm = torch.zeros((self.num_envs, 3), **kwargs)
         self._r_target_object_orientations_wrt_palm = torch.zeros((self.num_envs, 4), **kwargs)
         self._r_target_palm_positions_wrt_object = torch.zeros((self.num_envs, 3), **kwargs)
@@ -774,8 +616,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.curr_targets_buffer = torch.zeros((self.num_envs, self.num_dofs), **kwargs)
 
         # create slices from above buffer
-        self.prev_targets = self.prev_targets_buffer[:, self.allegro_hand_dof_start : self.allegro_hand_dof_end]
-        self.curr_targets = self.curr_targets_buffer[:, self.allegro_hand_dof_start : self.allegro_hand_dof_end]
+        self.prev_targets = self.prev_targets_buffer[:, self.floating_fingertip_dof_start : self.floating_fingertip_dof_end]
+        self.curr_targets = self.curr_targets_buffer[:, self.floating_fingertip_dof_start : self.floating_fingertip_dof_end]
 
 
         self.rb_forces = torch.zeros((self.num_envs, self.num_rigid_bodies, 3), **kwargs)
@@ -786,14 +628,9 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             self.occupied_object_indices, :
         ].view(self.num_envs, 4)
         self.robot_init_dof = torch.zeros((self.num_envs, self._dims.NUM_DOFS.value), **kwargs)
-        self._hand_geo_center = torch.tensor(self._hand_geo_center, **kwargs)
         self._table_pose_tensor = torch.tensor(self._table_pose, **kwargs)
-        self._target_hand_palm_pose = torch.tensor(self._target_hand_palm_pose, **kwargs)
-        self._current_hand_palm_pose = torch.tensor(self._current_hand_palm_pose, **kwargs)
-        self._xarm_right_init_position = torch.tensor(self._xarm_right_init_position, **kwargs)
-        self._xarm_right_init_orientation = torch.tensor(self._xarm_right_init_orientation, **kwargs)
-        self._palm2forearm_quat = torch.tensor(self._palm2forearm_quat, **kwargs)
-        self._palm2forearm_pos = torch.tensor(self._palm2forearm_pos, **kwargs)
+        self._floating_fingertip_init_position = torch.tensor(self._floating_fingertip_init_position, **kwargs)
+        self._floating_fingertip_init_orientation = torch.tensor(self._floating_fingertip_init_orientation, **kwargs)
         self._object_nominal_orientation = torch.tensor(self._object_nominal_orientation, **kwargs)
 
         if self.enable_full_pointcloud_observation:
@@ -801,7 +638,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             self.pointclouds_wrt_palm = torch.zeros((self.num_envs, self.num_object_points, 3), **kwargs)
 
         self.__init_meta_data()
-        self.preprocess_allegro_pointcloud()
 
         self.successes = torch.zeros(self.num_envs, **kwargs)
         self.done_successes = torch.zeros(self.num_envs, **kwargs)
@@ -868,17 +704,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             self.gym.destroy_viewer(self.viewer)
         self.gym.destroy_sim(self.sim)
 
-    # def test_pcl(self, env_ptr, env_id):
-    #     object_asset_options = gymapi.AssetOptions()
-    #     asset_sphere = self.gym.create_sphere(self.sim, 0.002, object_asset_options)
-    #     pose = gymapi.Transform()
-    #     pose.r = gymapi.Quat(0, 0, 0, 1)
-    #     pose.p = gymapi.Vec3(0.0, 0.0, 0.0)
-    #     pcl = torch.from_numpy(np.load("/home/thwu/Projects/func-mani/test.npy")).to("cuda:0")
-    #     for (i, point) in enumerate(pcl):
-    #         pose.p = gymapi.Vec3(point[0], point[1], point[2])
-    #         capsule_handle = self.gym.create_actor(env_ptr, asset_sphere, pose, "actor{}", i+1000, 0)
-
     def __init_meta_data(self):
         self.observation_info = {}
         observation_space = self.cfg["env"]["observationSpace"]
@@ -900,228 +725,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         )
         self.label_paths = self.grasping_dataset.label_paths.copy()
 
-    #######################
-    # Imagined Pointcloud #
-    #######################
-
-    def preprocess_allegro_pointcloud(self):
-        """Preprocess allegro-hand pointcloud.
-
-        Load original allegro-hand pointcloud, apply farthest point sampling, store the result in `self._cached_pointclouds`.
-
-            0.0-3.0 index finger
-            4.0-7.0 middle finger
-            8.0-11.0 ring finger
-            12.0-15.0 thumb
-        """
-
-
-        original_mesh_dir = os.path.join(self._asset_root, "hands", "allegro_hand", "meshes", "visual")
-        original_mesh_filepaths: OrderedDict = OrderedDict(
-            [
-                # Index finger (0.0-3.0)
-                ("ffproximal", "link_0.0.glb"),
-                ("ffmiddle", "link_1.0.glb"),
-                ("ffdistal", "link_2.0.glb"),
-                ("fftip", "link_tip.glb"),
-                # Middle finger (4.0-7.0)
-                ("mfproximal", "link_1.0.glb"),
-                ("mfmiddle", "link_2.0.glb"),
-                ("mfdistal", "link_3.0.glb"),
-                ("mftip", "link_tip.glb"),
-                # Ring finger (8.0-11.0)
-                ("rfproximal", "link_1.0.glb"),
-                ("rfmiddle", "link_2.0.glb"),
-                ("rfdistal", "link_3.0.glb"),
-                ("rftip", "link_tip.glb"),
-                # Thumb (12.0-15.0)
-                ("thproximal", "link_12.0_right.glb"),
-                ("thmiddle", "link_13.0.glb"),
-                ("thdistal", "link_14.0.glb"),
-                ("thtip", "link_tip.glb"),
-            ]
-        )
-
-        # load original mesh
-        components = OrderedDict()
-        for name, filepath in original_mesh_filepaths.items():
-            # Map to actual link names used in Allegro hand
-            if name.startswith("ff"):  # Index finger (finger 0)
-                if "proximal" in name:
-                    link_name = "link_0.0"
-                elif "middle" in name:
-                    link_name = "link_1.0"
-                elif "distal" in name:
-                    link_name = "link_2.0"
-                else:  # tip
-                    link_name = "link_3.0_tip"
-            elif name.startswith("mf"):  # Middle finger (finger 1)
-                if "proximal" in name:
-                    link_name = "link_4.0"
-                elif "middle" in name:
-                    link_name = "link_5.0"
-                elif "distal" in name:
-                    link_name = "link_6.0"
-                else:  # tip
-                    link_name = "link_7.0_tip"
-            elif name.startswith("rf"):  # Ring finger (finger 2)
-                if "proximal" in name:
-                    link_name = "link_8.0"
-                elif "middle" in name:
-                    link_name = "link_9.0"
-                elif "distal" in name:
-                    link_name = "link_10.0"
-                else:  # tip
-                    link_name = "link_11.0_tip"
-            elif name.startswith("th"):  # Thumb
-                if "proximal" in name:
-                    link_name = "link_12.0"
-                elif "middle" in name:
-                    link_name = "link_13.0"
-                elif "distal" in name:
-                    link_name = "link_14.0"
-                else:  # tip
-                    link_name = "link_15.0_tip"
-            else:
-                link_name = name
-
-            components[link_name] = {}
-            components[link_name]["mesh"] = trimesh.load(
-                os.path.join(original_mesh_dir, filepath), process=False, force="mesh"
-            )
-
-            area = components[link_name]["mesh"].area
-            if "proximal" in name:
-                area *= 0.3
-            elif "middle" in name:
-                area *= 0.6
-            components[link_name]["area"] = area
-
-        # compute number of samples for each component
-        area = sum([item["area"] for item in components.values()])
-        num_samples = self.num_imagined_points
-        for name in components:
-            components[name]["num_samples"] = int(round(components[name]["area"] / area * num_samples))
-            area -= components[name]["area"]
-            num_samples -= components[name]["num_samples"]
-        assert sum([item["num_samples"] for item in components.values()]) == self.num_imagined_points
-
-        # apply farthest point sampling
-        pointclouds = {}
-        for name in components:
-            vertices = torch.tensor(components[name]["mesh"].vertices, dtype=torch.float, device=self.device)
-            vertices *= 0.001  # convert to meter
-            pcd = pytorch3d.ops.sample_farthest_points(vertices[None, ...], K=components[name]["num_samples"])[0][0]
-            pointclouds[name] = pcd
-
-            components[name]["pointcloud"] = pcd
-            components[name]["contact"] = self.extract_contact_region(pcd)
-
-        # find rigid body index for each component
-        current_robot_asset = self.gym_assets["current"]["robot"]["asset"]
-        # target_robot_asset = self.gym_assets["target"]["robot"]["asset"]
-
-        if self.enable_contact_sensors:
-            for name in components:
-                components[name]["current_index"] = self.gym.find_asset_rigid_body_index(current_robot_asset, name)
-                # components[name]["target_index"] = self.gym.find_asset_rigid_body_index(target_robot_asset, name)
-
-                # For Allegro hand, map to force sensor names at fingertips
-                if name in ["link_3.0_tip", "link_7.0_tip", "link_11.0_tip", "link_15.0_tip"]:
-                    sensor_name = f"sensor_{name}"
-                    components[name]["sensor_index"] = (
-                        self.force_sensor_names.index(sensor_name) if sensor_name in self.force_sensor_names else -1
-                    )
-                else:
-                    components[name]["sensor_index"] = -1  # No sensor for non-tip links
-                print(f"Link: {name}, Sensor: {components[name]['sensor_index']}")
-
-        self._cached_pointclouds = pointclouds
-        self.imagined_pointcloud_components = components
-        # print(self.imagined_pointcloud_components)
-
-    def extract_contact_region(self, pointcloud: torch.Tensor) -> torch.Tensor:
-        """Split the allegro-hand pointcloud to `front` and `back` side."""
-        x, y, z = pointcloud[:, 0], pointcloud[:, 1], pointcloud[:, 2]
-        return (x.abs() < 0.9 * x.abs().max()) & (z.abs() < 0.9 * z.abs().max()) & (y < 0)
-
-    def compute_imagined_pointclouds(
-        self,
-        stage: str,
-        return_finger_index: bool = False,
-        return_part_index: bool = False,
-        return_binary_contact: bool = False,
-    ) -> torch.Tensor:
-        """Compute imagined pointclouds.
-
-        Args:
-            stage (str): "current" or "target"
-            return_finger_index (bool, optional): _description_. Defaults to False.
-            return_part_index (bool, optional): _description_. Defaults to False.
-            return_binary_contact (bool, optional): _description_. Defaults to False.
-
-        Returns:
-            torch.Tensor: imagined pointclouds w.r.t. world frame (num_envs, num_imagined_points, 3)
-        """
-        assert stage in ["current", "target"], "stage must be either `current` or `target`"
-
-        if stage == "current":
-            rigid_body_positions = self.allegro_hand_rigid_body_positions
-            rigid_body_orientations = self.allegro_hand_rigid_body_orientations
-        else:
-            rigid_body_positions = self.target_allegro_hand_rigid_body_positions
-            rigid_body_orientations = self.target_allegro_hand_rigid_body_orientations
-
-        imagined_pointclouds = torch.zeros((self.num_envs, self.num_imagined_points, 3), device=self.device)
-        cursor = 0
-        for name in self.imagined_pointcloud_components:
-            component = self.imagined_pointcloud_components[name]
-            i = component["current_index"] if stage == "current" else component["target_index"]
-
-            pcd = component["pointcloud"].clone()
-            if pcd.size(0) == 0:
-                continue
-
-            position = rigid_body_positions[:, i]
-            rotation = rigid_body_orientations[:, i]
-
-            num_points = pcd.size(0)
-
-            pcd = transformation_apply(rotation[:, None, :], position[:, None, :], pcd[None, :, :])
-            imagined_pointclouds[:, cursor : cursor + num_points, :] = pcd
-
-            if return_binary_contact:
-                # create binary contact
-                contact = torch.zeros((self.num_envs, num_points), device=self.device)
-                mask = component["contact"]
-                if component["sensor_index"] != -1:
-                    contact[:] = mask[None, :] * self.contact_forces[:, component["sensor_index"]][:, None]
-
-            if return_finger_index:
-                # create finger index
-                finger_indices = torch.zeros((self.num_envs, num_points), device=self.device)
-                finger_names = ["_th", "_ff", "_mf", "_rf", "_lf"]
-                for i, finger in enumerate(finger_names):
-                    if finger in name:
-                        finger_indices[:] = i
-                        break
-                else:
-                    raise ValueError(f"Unknown finger name: {name}")
-
-            if return_part_index:
-                # create part index
-                part_indices = torch.zeros((self.num_envs, num_points), device=self.device)
-                part_names = ["proximal", "middle", "distal"]
-                for i, part in enumerate(part_names):
-                    if part in name:
-                        part_indices[:] = i
-                        break
-                else:
-                    raise ValueError(f"Unknown part name: {name}")
-
-            cursor += num_points
-        return imagined_pointclouds
-
     def train(self):
         self.training = True
 
@@ -1133,7 +736,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         if self.viewer != None:
             # print("Viewer already exists, skipping viewer setup.")
             # pass
-            cam_pos = gymapi.Vec3(1.0, 0.0, 1.2)
+            cam_pos = gymapi.Vec3(1.0, 1.0, 3.2)
             cam_target = gymapi.Vec3(0.0, 0.0, 0.2)
             self.gym.viewer_camera_look_at(self.viewer, None, cam_pos, cam_target)
 
@@ -1174,17 +777,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.gym.refresh_jacobian_tensors(self.sim)
 
         net_contact_forces = self.net_contact_forces.view(self.num_envs, self.num_rigid_bodies, 3)
-        self.arm_contact_forces = net_contact_forces[:, self.arm_link_indices, :]
-        self.hand_contact_forces = net_contact_forces[:, self.hand_link_indices, :]
-
-        self.fingertip_states = self.allegro_hand_rigid_body_states[:, self.fingertip_indices, :]
-        self.fingertip_positions = self.fingertip_states[..., 0:3]
-        self.fingertip_orientations = self.fingertip_states[..., 3:7]
-        self.fingertip_linear_velocities = self.fingertip_states[..., 7:10]
-        self.fingertip_angular_velocities = self.fingertip_states[..., 10:13]
-
-        self.keypoint_positions = self.allegro_hand_rigid_body_positions[:, self.keypoint_indices, :]
-
+        self.floating_fingertip_net_contact_forces = net_contact_forces[:, self.floating_fingertip_indices, :]
 
         self.object_root_states = self.root_states[self.occupied_object_indices]
         self.object_root_positions = self.object_root_states[..., 0:3]
@@ -1259,39 +852,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             self.nearest_non_target_object_positions[:, :self.k_nearest, :][self._invalid_mask_pos] = 0.0
             self.nearest_non_target_object_orientations[:, :self.k_nearest, :][self._invalid_mask_ori] = 0.0
 
-
-        self.object_bboxes_wrt_world[:, :3] = transformation_apply(
-            self.object_root_orientations, self.object_root_positions, self.object_bboxes[:, :3]
-        )
-        self.object_bboxes_wrt_world[:, 3:] = transformation_apply(
-            self.object_root_orientations, self.object_root_positions, self.object_bboxes[:, 3:]
-        )
-
-        world_to_palm_rotation, world_to_palm_translation = transformation_inverse(
-            self.allegro_hand_center_orientations, self.allegro_hand_center_positions
-        )
-
-        self.object_bboxes_wrt_palm[:, :3] = transformation_apply(
-            world_to_palm_rotation, world_to_palm_translation, self.object_bboxes_wrt_world[:, :3]
-        )
-        self.object_bboxes_wrt_palm[:, 3:] = transformation_apply(
-            world_to_palm_rotation, world_to_palm_translation, self.object_bboxes_wrt_world[:, 3:]
-        )
-
-        self.palm_orientations_wrt_object, self.palm_positions_wrt_object = compute_relative_pose(
-            self.allegro_hand_center_orientations,
-            self.allegro_hand_center_positions,
-            self.object_root_orientations,
-            self.object_root_positions,
-        )
-
-        self.fingertip_orientations_wrt_palm, self.fingertip_positions_wrt_palm = compute_relative_pose(
-            self.fingertip_orientations,
-            self.fingertip_positions,
-            self.allegro_hand_center_orientations[:, None, :],
-            self.allegro_hand_center_positions[:, None, :],
-        )
-
         if add_noise:
             obj_pos_estimation_nosie = torch.clamp(
                 torch.randn_like(self.object_root_positions.clone()) * np.sqrt(0.0004), -0.02, 0.02
@@ -1305,69 +865,13 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
                 self.object_root_orientations.clone(),
                 obj_quat_estimation_noise,
             )
-            self.observed_object_orientations_wrt_palm, self.observed_object_positions_wrt_palm = compute_relative_pose(
-                self.observed_object_orientations,
-                self.observed_object_positions,
-                self.allegro_hand_center_orientations,
-                self.allegro_hand_center_positions,
-            )
-
-        self.object_orientations_wrt_palm, self.object_positions_wrt_palm = compute_relative_pose(
-            self.object_root_orientations,
-            self.object_root_positions,
-            self.allegro_hand_center_orientations,
-            self.allegro_hand_center_positions,
-        )
-
-        self.object_positions_wrt_keypoints = self.keypoint_positions - self.object_root_positions[:, None, :]
 
 
-
-
-        self.position_distances = self.object_positions_wrt_palm - self._r_target_object_positions_wrt_palm
-        self.orientation_distances = quat_mul(
-            self.object_orientations_wrt_palm, quat_conjugate(self._r_target_object_orientations_wrt_palm)
-        )
-        self.dof_distances = (
-            self.allegro_hand_dof_positions[:, self.allegro_digits_actuated_dof_indices]
-            - self._r_target_allegro_digits_actuated_dof_positions
-        )
-
-        if self.enable_contact_sensors:
-            contact_forces = self.allegro_hand_net_contact_forces[:, self.force_sensor_rigid_body_indices, :]
-            contact_forces = torch.norm(contact_forces, dim=-1)
-            # binary contact sensor
-            self.contact_forces = torch.where(contact_forces >= self.contact_sensor_threshold, 1.0, 0.0)
-            self.fingertip_contact_forces = self.contact_forces[:, self.fingertip_contact_mask]
-
-            # visualize
-            # for (env_id, each_env_contacts) in enumerate(self.contact_forces):
-            #     for (contact_idx, each_env_contact) in enumerate(each_env_contacts):
-            #         self.gym.set_rigid_body_color(self.envs[env_id], 0, self.force_sensor_parent_rigid_body_indices[contact_idx], gymapi.MESH_VISUAL_AND_COLLISION, gymapi.Vec3(each_env_contact, 0.0, 0.0))
-            # import time
-            # time.sleep(0.1)
         if self.enable_full_pointcloud_observation:
             self.obj_pointclouds_wrt_world = self.compute_object_pointclouds("current")
             self.target_obj_pointclouds_wrt_world = self.compute_object_pointclouds("target")
 
             self.object_pointclouds = self.obj_pointclouds_wrt_world
-            self.pointclouds_wrt_palm = compute_relative_position(
-                self.obj_pointclouds_wrt_world,
-                self.allegro_hand_center_orientations[:, None, :],
-                self.allegro_hand_center_positions[:, None, :],
-            )
-            self.object_pointclouds_wrt_palm = self.pointclouds_wrt_palm
-
-
-        if self.enable_imagined_pointcloud_observation:
-            self.imagined_pointclouds = self.compute_imagined_pointclouds("current")
-            self.imagined_pointclouds_wrt_palm = compute_relative_position(
-                self.imagined_pointclouds,
-                self.allegro_hand_center_orientations[:, None, :],
-                self.allegro_hand_center_positions[:, None, :],
-            )
-
-
 
         if self.enable_rendered_pointcloud_observation:
             self.gym.fetch_results(self.sim, True)
@@ -1442,49 +946,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
             # o3d.visualization.draw_geometries([o3d_pointcloud, origin_axis])
             self.gym.end_access_image_tensors(self.sim)
-
-        # compute tip-tip and tip-mid equidistant points - (CASE2023 Baseline)
-        if self.method == "case":
-            thtip_index = self.gym.find_asset_rigid_body_index(self.gym_assets["current"]["robot"]["asset"], "rh_thtip")
-            mfmid_index = self.gym.find_asset_rigid_body_index(
-                self.gym_assets["current"]["robot"]["asset"], "rh_mfmiddle"
-            )
-            mftip_index = self.gym.find_asset_rigid_body_index(self.gym_assets["current"]["robot"]["asset"], "rh_mftip")
-
-            thtip_positions = self.allegro_hand_rigid_body_positions[:, thtip_index]
-            mfmid_positions = self.allegro_hand_rigid_body_positions[:, mfmid_index]
-            mftip_positions = self.allegro_hand_rigid_body_positions[:, mftip_index]
-
-            alpha = (torch.arange(1, 4, device=self.device) / 4.0).reshape(1, 3, 1)
-            tiptip_points = alpha * thtip_positions[:, None, :] + (1 - alpha) * mftip_positions[:, None, :]
-            tipmid_points = alpha * thtip_positions[:, None, :] + (1 - alpha) * mfmid_positions[:, None, :]
-            kpoint_positions = torch.cat([tiptip_points, tipmid_points], dim=1)
-            kpoint_positions_wrt_object = compute_relative_position(
-                kpoint_positions,
-                self.object_root_orientations[:, None, :],
-                self.object_root_positions[:, None, :],
-            )
-            self.kpoint_distances = point_to_mesh_distance(
-                kpoint_positions_wrt_object,
-                self.grasping_dataset._sdf_fields,
-                self.occupied_mesh_indices,
-            )
-
-            fingertip_positions_wrt_object = compute_relative_position(
-                self.fingertip_positions,
-                self.object_root_orientations[:, None, :],
-                self.object_root_positions[:, None, :],
-            )
-            self.fingertip_distances = point_to_mesh_distance(
-                fingertip_positions_wrt_object,
-                self.grasping_dataset._sdf_fields,
-                self.occupied_mesh_indices,
-            )
-
-            norm_object_orientation = torch.tensor([0.0, 0.0, 1.0, 0.0], device=self.device).repeat(self.num_envs, 1)
-            self.norm_object_orientation_wrt_palm = quat_mul(
-                quat_conjugate(self.allegro_hand_center_orientations), norm_object_orientation
-            )
 
     def __configure_specifications(self, specs: Dict, mdp_type: str) -> None:
         assert "__dim__" in specs, "spec must contain `__dim__`"
@@ -1744,44 +1205,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             "num_rigid_shapes": num_rigid_shapes,
         }
 
-    def __define_contact_sensors(self, allegro_hand_asset: gymapi.Asset) -> None:
-        """Configure the contact sensors.
-
-        All the contact sensors are attached to the allegro Hand. The corresponding link names should start with `sensor_`.
-
-        Args:
-            allegro_hand_asset (gymapi.Asset): The allegro Hand asset to configure.
-        """
-        indices = []
-        fingertip_indices = []
-        parent_indices = []
-
-        print("Contact sensors:")
-        for name, index in self.gym.get_asset_rigid_body_dict(allegro_hand_asset).items():
-            if name.startswith("sensor_"):
-                indices.append(index)
-                if "distal" in name:
-                    fingertip_indices.append(index)
-                print(f"- {name} ({index})")
-        fingertip_contact_mask = [(i in fingertip_indices) for i in indices]
-
-        assert len(indices) > 0, "No contact sensors found in the allegro Hand asset."
-        self.force_sensor_rigid_body_indices = torch.tensor(indices).long().sort().values.to(self.device)
-
-        self.force_sensor_names = []
-        for i in self.force_sensor_rigid_body_indices:
-            name = self.gym.get_asset_rigid_body_name(allegro_hand_asset, i)
-            self.force_sensor_names.append(name)
-
-            parent_name = name.replace("sensor", "rh")
-            parent_indices.append(self.gym.find_asset_rigid_body_index(allegro_hand_asset, parent_name))
-
-        self.force_sensor_parent_rigid_body_indices = torch.tensor(parent_indices).long().to(self.device)
-        self.fingertip_contact_mask = torch.tensor(fingertip_contact_mask).bool().to(self.device)
-        self.num_tactile_sensors = self.force_sensor_rigid_body_indices.size(0)
-        # find same element in two lists
-        self.ft_idx_in_all = [i for (i, index) in enumerate(indices) if index in fingertip_indices]
-
     @property
     def contact_states(self) -> torch.Tensor:
         """Compute contact states (tactile information) from force sensor data.
@@ -1796,58 +1219,37 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         raise NotImplementedError("Contact states are not implemented")
 
-    def __configure_robot_dof_indices(self, allegro_hand_asset: gymapi.Asset) -> None:
-        """Configure the xArm6 + Allegro Hand DOFs.
+    def __configure_robot_dof_indices(self, floating_fingertip_asset: gymapi.Asset) -> None:
+        """Configure the floating fingertip DOFs.
 
         Args:
-            allegro_hand_asset (gymapi.Asset): The xArm6 + Allegro Hand asset to configure.
+            floating_fingertip_asset (gymapi.Asset): The floating fingertip asset to configure.
         """
-        dof_dict = self.gym.get_asset_dof_dict(allegro_hand_asset)
+        dof_dict = self.gym.get_asset_dof_dict(floating_fingertip_asset)
 
         actuated_dof_indices = []
-        xarm_actuated_dof_indices = []
-        allegro_actuated_dof_indices = []
-        allegro_digits_actuated_dof_indices = []
-        allegro_fingers_actuated_dof_indices = []
-        allegro_thumb_actuated_dof_indices = []
 
         for name, index in dof_dict.items():
-            if any([dof in name for dof in self._xarm_dof_names]):
-                xarm_actuated_dof_indices.append(index)
-            elif any([dof in name for dof in self._allegro_hand_dof_names]):
-                allegro_actuated_dof_indices.append(index)
-                allegro_digits_actuated_dof_indices.append(index)
-
-                if any([dof in name for dof in self._allegro_fingers_dof_names]):
-                    allegro_fingers_actuated_dof_indices.append(index)
-                elif any([dof in name for dof in self._allegro_thumb_dof_names]):
-                    allegro_thumb_actuated_dof_indices.append(index)
-
             actuated_dof_indices.append(index)
 
         def _torchify(indices: List[int]) -> torch.LongTensor:
             return torch.tensor(sorted(indices)).long().to(self.device)
 
         self.actuated_dof_indices = _torchify(actuated_dof_indices)
-        self.xarm_actuated_dof_indices = _torchify(xarm_actuated_dof_indices)
-        self.allegro_actuated_dof_indices = _torchify(allegro_actuated_dof_indices)
-        self.allegro_digits_actuated_dof_indices = _torchify(allegro_digits_actuated_dof_indices)
-        self.allegro_fingers_actuated_dof_indices = _torchify(allegro_fingers_actuated_dof_indices)
-        self.allegro_thumb_actuated_dof_indices = _torchify(allegro_thumb_actuated_dof_indices)
 
-    def __define_allegro_hand_with_arm(
-        self, asset_name: str = "allegro Hand + xarm"
+    def __define_floating_fingertip(
+        self, asset_name: str = "floating_fingertip"
     ) -> Dict[str, Any]:
-        """Define & load the allegro Hand + xarm asset.
+        """Define & load the floating fingertip asset.
 
         Args:
-            asset_name (str, optional): Asset name for logging. Defaults to "allegro Hand + xarm".
+            asset_name (str, optional): Asset name for logging. Defaults to "floating_fingertip".
 
         Returns:
             Dict[str, Any]: The configuration of the robot.
         """
-        print(">>> Loading allegro Hand + xarm for current scene")
-        config = {"name": "allegro_hand"}
+        print(">>> Loading floating fingertip for current scene")
+        config = {"name": "floating_fingertip"}
 
         asset_options = gymapi.AssetOptions()
         asset_options.flip_visual_attachments = False
@@ -1864,14 +1266,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         if self.env_info_logging:
             print_asset_options(asset_options, asset_name)
 
-        if self.enable_contact_sensors:
-            if self.contact_sensor_fingertip_only:
-                asset_filename = self._xarm_allegro_hand_right_asset_file.replace(".urdf", "_contact_fingertip.urdf")
-            else:
-                asset_filename = self._xarm_allegro_hand_right_asset_file.replace(".urdf", "_contact.urdf")
-        else:
-            asset_filename = self._xarm_allegro_hand_right_asset_file
-
+        asset_filename = self._floating_fingertip_urdf
+        
         asset = self.gym.load_asset(self.sim, self._asset_root, asset_filename, asset_options)
         if self.env_info_logging:
             print_links_and_dofs(self.gym, asset, asset_name)
@@ -1884,45 +1280,9 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         num_dofs = config["num_dofs"]
 
-        # fmt: off
-        mjcf_stiffness = [
-            5.0, 5.0,
-            1.0, 1.0, 1.0, 1.0,
-            1.0, 1.0, 1.0, 1.0,
-            1.0, 1.0, 1.0, 1.0,
-            1.0, 1.0, 1.0, 1.0, 1.0,
-            1.0, 1.0, 1.0, 1.0, 1.0,
-        ]
-        mjcf_damping = [
-            0.5, 0.5,
-            0.1, 0.1, 0.1, 0.1,
-            0.1, 0.1, 0.1, 0.1,
-            0.1, 0.1, 0.1, 0.1,
-            0.1, 0.1, 0.1, 0.1, 0.1,
-            0.1, 0.1, 0.1, 0.1, 0.1,
-        ]
-        mjcf_velocity = [
-            100.0, 100.0,
-            100.0, 100.0, 100.0, 100.0,
-            100.0, 100.0, 100.0, 100.0,
-            100.0, 100.0, 100.0, 100.0,
-            100.0, 100.0, 100.0, 100.0, 100.0,
-            100.0, 100.0, 100.0, 100.0, 100.0,
-        ]
-        mjcf_effort = [
-            4.7849998e00, 2.1750000e00,
-            8.9999998e-01, 8.9999998e-01, 7.2450000e-01, 7.2450000e-01,
-            8.9999998e-01, 8.9999998e-01, 7.2450000e-01, 7.2450000e-01,
-            8.9999998e-01, 8.9999998e-01, 7.2450000e-01, 7.2450000e-01,
-            8.9999998e-01, 8.9999998e-01, 8.9999998e-01, 7.2450000e-01, 7.2450000e-01,
-            2.3722000e00, 1.4500000e00, 9.9000001e-01, 9.9000001e-01, 8.1000000e-01,
-        ]
-        # fmt: on
-
         dof_props = self.gym.get_asset_dof_properties(asset)
-        hand_dof_idx = 0
 
-        # set rigid-shape properties for allegro-hand
+        # set rigid-shape properties for floating fingertip
         rigid_shape_props = self.gym.get_asset_rigid_shape_properties(asset)
         for shape in rigid_shape_props:
             shape.friction = 3.0
@@ -1931,17 +1291,9 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         for i in range(num_dofs):
             name = self.gym.get_asset_dof_name(asset, i)
             dof_props["driveMode"][i] = gymapi.DOF_MODE_POS
-            if name.endswith(".0"):
-                dof_props["stiffness"][i] = 30
-                dof_props["damping"][i] = 1
-                dof_props["velocity"][i] = 3.0
-                dof_props["effort"][i] = 5
-                hand_dof_idx += 1
-            else:
-                dof_props["stiffness"][i] = 4000
-                dof_props["damping"][i] = 80
-                # dof_props["stiffness"][i] = 1e6
-                # dof_props["damping"][i] = 1e2
+
+            dof_props["stiffness"][i] = 4000
+            dof_props["damping"][i] = 80
 
         if self.env_info_logging:
             print_dof_properties(self.gym, asset, dof_props, asset_name)
@@ -1951,14 +1303,12 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         dof_init_positions = [0.0 for _ in range(num_dofs)]
         dof_init_velocities = [0.0 for _ in range(num_dofs)]
 
-        # reset xarm initial dof positions
-        for name, value in self._xarm_right_init_dof_positions.items():
+        # reset floating fingertip initial dof positions
+        for name, value in self._floating_fingertip_init_dof_positions.items():
             dof_init_positions[self.gym.find_asset_dof_index(asset, name)] = value
-        for name, value in self.allegro_hand_init_dof_positions.items():
-            dof_init_positions[self.gym.find_asset_dof_index(asset, name)] = value
-            self._allegro_hand_predef_qpos[
-                self.gym.find_asset_dof_index(asset, name) - 6
-            ] = value  # substract 6 for xarm dofs
+            self._floating_fingertip_predef_qpos[
+                self.gym.find_asset_dof_index(asset, name)
+            ] = value
 
         config["limits"] = {}
         config["limits"]["lower"] = torch.tensor(dof_lower_limits).float().to(self.device)
@@ -1968,8 +1318,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         config["init"]["position"] = torch.tensor(dof_init_positions).float().to(self.device)
         config["init"]["velocity"] = torch.tensor(dof_init_velocities).float().to(self.device)
 
-        if self.enable_contact_sensors:
-            self.__define_contact_sensors(asset)
         self.__configure_robot_dof_indices(asset)
 
         # fmt: off
@@ -1988,21 +1336,14 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         )
 
         pose = gymapi.Transform()
-        pose.p = gymapi.Vec3(*self._xarm_right_init_position)
-        pose.r = gymapi.Quat(*self._xarm_right_init_orientation)
-
-        self.allegro_center_index = self.gym.find_asset_rigid_body_index(asset, self._allegro_hand_center_prim)
-        self.allegro_palm_index = self.gym.find_asset_rigid_body_index(asset, self._allegro_hand_palm_prim)
-        self.fingertip_indices = [self.gym.find_asset_rigid_body_index(asset, prim) for prim in self._fingertips]
-        self.keypoint_indices = [self.gym.find_asset_rigid_body_index(asset, prim) for prim in self._keypoints]
-        self.arm_link_indices = [self.gym.find_asset_rigid_body_index(asset, prim) for prim in self._arm_links]
-        self.hand_link_indices = [self.gym.find_asset_rigid_body_index(asset, prim) for prim in self._hand_links]
+        pose.p = gymapi.Vec3(*self._floating_fingertip_init_position)
+        pose.r = gymapi.Quat(*self._floating_fingertip_init_orientation)
 
         config["asset"] = asset
         config["pose"] = pose
         config["dof_props"] = dof_props
 
-        print(">>> xArm6 + Allegro Hand loaded")
+        print(">>> Floating Fingertip loaded")
         return config
 
     def __define_object(self, dataset: str = "boxes") -> Dict[str, Any]:
@@ -2218,80 +1559,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         return poses
 
-    def __define_target_allegro_hand(self, asset_name: str = "Target allegro Hand") -> Dict[str, Any]:
-        """Define & load the target allegro Hand.
-
-        Args:
-            asset_name (str, optional): Asset name for logging. Defaults to "Target allegro Hand".
-
-        Returns:
-            Dict[str, Any]: The configuration of the target allegro Hand.
-        """
-        print(">>> Loading allegro Hand for target scene")
-        config = {"name": "target_allegro_hand"}
-
-        asset_options = gymapi.AssetOptions()
-        asset_options.fix_base_link = True
-        asset_options.collapse_fixed_joints = False
-        asset_options.disable_gravity = True
-
-        if self.physics_engine == gymapi.SIM_PHYSX:
-            asset_options.use_physx_armature = True
-        asset_options.default_dof_drive_mode = int(gymapi.DOF_MODE_NONE)
-        if self.env_info_logging:
-            print_asset_options(asset_options, asset_name)
-
-        asset = self.gym.load_asset(self.sim, self._asset_root, self._allegro_hand_right_asset_file, asset_options)
-        if self.env_info_logging:
-            print_links_and_dofs(self.gym, asset, asset_name)
-
-        config["num_rigid_bodies"] = self.gym.get_asset_rigid_body_count(asset)
-        config["num_rigid_shapes"] = self.gym.get_asset_rigid_shape_count(asset)
-        config["num_dofs"] = self.gym.get_asset_dof_count(asset)
-        config["num_actuators"] = self.gym.get_asset_actuator_count(asset)
-        config["num_tendons"] = self.gym.get_asset_tendon_count(asset)
-
-        dof_props = self.gym.get_asset_dof_properties(asset)
-        for i in range(config["num_dofs"]):
-            dof_props["driveMode"][i] = gymapi.DOF_MODE_POS
-            dof_props["stiffness"][i] = 3.0
-            dof_props["damping"][i] = 0.0
-        if self.env_info_logging:
-            print_dof_properties(self.gym, asset, dof_props, asset_name)
-
-        self.target_allegro_center_index = self.gym.find_asset_rigid_body_index(asset, self._allegro_hand_center_prim)
-        self.target_fingertip_indices = [
-            self.gym.find_asset_rigid_body_index(asset, f"rh_{prim}") for prim in self._fingertips
-        ]
-
-        pose = gymapi.Transform()
-
-        if self.save_video:
-            pose.p = gymapi.Vec3(-0.4 + video_pose[0], 0.3 + video_pose[1], 0.8 + video_pose[2])
-        else:
-            pose.p = gymapi.Vec3(-0.4, 0.3, 0.8)
-
-        pose.r = gymapi.Quat(0.0, -np.sqrt(0.5), np.sqrt(0.5), 0.0)
-
-        config["asset"] = asset
-        config["pose"] = pose
-        config["dof_props"] = dof_props
-
-        print(">>> Target allegro Hand loaded")
-
-        return config
-
-    def __define_target_object(self, dataset: str = "boxes") -> Dict[str, Any]:
-        """For singulation task, we don't need target objects with reference poses."""
-        # Return empty config as we don't need target objects for singulation
-        return {
-            "warehouse": [],
-            "count": 0,
-            "num_rigid_bodies": 0,
-            "num_rigid_shapes": 0,
-            "poses": []
-        }
-
     def __define_camera(self) -> None:
         """Define the cameras for the rendering."""
         if not self.enable_rendered_pointcloud_observation and not self.save_video:
@@ -2327,7 +1594,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             torch.tensor([-self._table_x_length / 2, -self._table_y_length / 2, 0.34], device=self.device),
             torch.tensor([self._table_x_length / 2, self._table_y_length / 2, 1.20], device=self.device),
         )
-
+        
     def __create_box_grid_dataset(self, device=None) -> None:
         # Create simple box grid dataset for singulation task
         from .dataset import BoxGridDataset
@@ -2343,20 +1610,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         )
 
         self.num_categories = self.grasping_dataset._category_matrix.shape[1]
-
-
-
-    def __reset_grasping_joint_indices(self) -> None:
-        # if "target" in self.gym_assets and "robot" in self.gym_assets["target"]:
-        #     asset = self.gym_assets["target"]["robot"]["asset"]
-        # else:
-        #     asset = self.__define_target_allegro_hand()["asset"]
-
-        asset = self.gym_assets["target"]["robot"]["asset"]
-
-        indices = [self.gym.find_asset_dof_index(asset, name) for name in self.grasping_dataset.dof_names]
-        print("grasping dataset joints:", self.grasping_dataset.dof_names)
-        self.grasping_joint_indices = torch.tensor(indices).long().to(self.device)
 
     def __reset_action_indices(self) -> None:
         (
@@ -2484,12 +1737,9 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         print(">>> Defining gym assets")
 
-        self.gym_assets["current"]["robot"] = self.__define_allegro_hand_with_arm()
+        self.gym_assets["current"]["robot"] = self.__define_floating_fingertip()
         self.gym_assets["current"]["objects"] = self.__define_object()
         self.gym_assets["current"]["table"] = self.__define_table()
-
-
-        # self.gym_assets["target"]["robot"] = self.__define_target_allegro_hand()
 
         self.__define_camera()
 
@@ -2500,7 +1750,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.envs = []
         self.cameras_handle = []
 
-        allegro_hand_indices = []
+        floating_fingertip_indices = []
         table_indices = []
         object_indices = [[] for _ in range(num_envs)]
         object_encodings = [[] for _ in range(num_envs)]
@@ -2513,6 +1763,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         print(">>> Creating environments")
         print("    - max_aggregate_bodies: ", max_aggregate_bodies)
         print("    - max_aggregate_shapes: ", max_aggregate_shapes)
+        
+        self.floating_fingertip_dof_init_positions_per_env = torch.zeros((num_envs, 6), device=self.device)
 
         for i in range(num_envs):
             env = self.gym.create_env(self.sim, lower, upper, num_per_row)
@@ -2524,11 +1776,11 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
                 if not agg_success:
                     raise RuntimeError("begin_aggregate failed")
 
-            # add allegro hand to the environment
+            # add floating fingertip to the environment
             actor_index, actor_handle = self.__create_sim_actor(
                 env, self.gym_assets["current"]["robot"], i, actor_handle=True
             )
-            allegro_hand_indices.append(actor_index)
+            floating_fingertip_indices.append(actor_index)
 
             poses = self.gym_assets["current"]["objects"]["poses"]
             for k in range(self.num_objects_per_env):
@@ -2541,6 +1793,9 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
                 if is_target:
                     actor_index = self.__create_sim_actor(env, cfg, i, "targ_obj", pose, color=targ_obj_color)
+                    target_box_center = torch.tensor([pose.p.x, pose.p.y, pose.p.z], device=self.device)
+                    target_box_top_center = target_box_center + self._obj_height / 2
+                    self.floating_fingertip_dof_init_positions_per_env[i, :3] = target_box_top_center
                 else:
                     actor_index = self.__create_sim_actor(env, cfg, i, f"sur_obj_{k}", pose, color=surr_obj_color)
 
@@ -2618,17 +1873,17 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         print(f">>> Done creating {num_envs} environments")
 
-        allegro_hand = self.gym.find_actor_handle(env, "allegro_hand")
-        self.allegro_hand_index = self.gym.get_actor_index(env, allegro_hand, gymapi.DOMAIN_ENV)
+        floating_fingertip = self.gym.find_actor_handle(env, "floating_fingertip")
+        self.floating_fingertip_index = self.gym.get_actor_index(env, floating_fingertip, gymapi.DOMAIN_ENV)
 
 
-        # define start and end indices for allegro hand DOFs to create contiguous slices
-        self.allegro_hand_dof_start = self.gym.get_actor_dof_index(env, allegro_hand, 0, gymapi.DOMAIN_ENV)
-        self.allegro_hand_dof_end = self.allegro_hand_dof_start + self.gym_assets["current"]["robot"]["num_dofs"]
-        self.allegro_hand_indices = torch.tensor(allegro_hand_indices).long().to(self.device)
-        self.allegro_hand_rigid_body_start = self.gym.get_actor_rigid_body_index(env, allegro_hand, 0, gymapi.DOMAIN_ENV)
-        self.allegro_hand_rigid_body_end = (
-            self.allegro_hand_rigid_body_start + self.gym_assets["current"]["robot"]["num_rigid_bodies"]
+        # define start and end indices for floating finger DOFs to create contiguous slices
+        self.floating_fingertip_dof_start = self.gym.get_actor_dof_index(env, floating_fingertip, 0, gymapi.DOMAIN_ENV)
+        self.floating_fingertip_dof_end = self.floating_fingertip_dof_start + self.gym_assets["current"]["robot"]["num_dofs"]
+        self.floating_fingertip_indices = torch.tensor(floating_fingertip_indices).long().to(self.device)
+        self.floating_fingertip_rigid_body_start = self.gym.get_actor_rigid_body_index(env, floating_fingertip, 0, gymapi.DOMAIN_ENV)
+        self.floating_fingertip_rigid_body_end = (
+            self.floating_fingertip_rigid_body_start + self.gym_assets["current"]["robot"]["num_rigid_bodies"]
         )
 
 
@@ -2886,88 +2141,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             obj_pcd.colors = o3d.utility.Vector3dVector(color)
         o3d.visualization.draw_geometries([obj_pcd, pcd])
 
-    def compute_contact_reward(self, mutual=False):
-        # fingerjoint error
-        self.fj_dist = F.pairwise_distance(
-            self.allegro_hand_dof_positions[:, self.allegro_digits_actuated_dof_indices],
-            self._r_target_allegro_digits_actuated_dof_positions,
-        )
-        # print("object_targets")
-        # print(self.object_targets.shape)
-        # print(self.target_allegro_hand_dof_positions.shape)
-        # print(self.object_targets[:, 7:])
-        # print(self.target_allegro_hand_dof_positions.device, self.actuated_dof_indices.device)
-        # print(self.target_allegro_hand_dof_positions.shape)
-        # print(self.actuated_dof_indices)
-        # print(self.target_allegro_hand_dof_positions[:, self.actuated_dof_indices])
-        # self.fj_dist = (
-        #     self.allegro_hand_dof_positions[:, self.allegro_digits_actuated_dof_indices] - self.object_targets[:, 7:]
-        # ).norm(p=1, dim=1) / len(self.allegro_actuated_dof_indices)
-        self.extras["fj_dist"] = self.fj_dist.clone()
 
-        if "fjcontact" in self.reward_type:
-            # fingerjoint error
-            if high_thumb_reward:
-                finger_dof_dis = F.pairwise_distance(
-                    self.allegro_hand_dof_positions[:, self.allegro_fingers_actuated_dof_indices],
-                    self._r_target_allegro_fingers_actuated_dof_positions,
-                )
-                thumb_dof_dis = F.pairwise_distance(
-                    self.allegro_hand_dof_positions[:, self.allegro_thumb_actuated_dof_indices],
-                    self._r_target_allegro_thumb_actuated_dof_positions,
-                )
-                self.contact_dist = torch.sqrt(
-                    finger_dof_dis * finger_dof_dis * 9 / 13 + thumb_dof_dis * thumb_dof_dis * 9 / 5
-                )
-            else:
-                self.contact_dist = F.pairwise_distance(
-                    self.allegro_hand_dof_positions[:, self.allegro_digits_actuated_dof_indices],
-                    self._r_target_allegro_digits_actuated_dof_positions,
-                )
-
-            if self.relative_part_reward:
-                no_prev_dist_ids = torch.where(self.prev_contact_dist == -1)[0]
-                self.prev_contact_dist[no_prev_dist_ids] = self.contact_dist[no_prev_dist_ids].clone()
-                contact_rew = (self.prev_contact_dist - self.contact_dist) / (self.dof_speed_scale * self.dt)
-                self.prev_contact_dist = self.contact_dist.clone()
-            else:
-                contact_rew = 10.0 * self.contact_eps / (torch.abs(self.contact_dist) + self.contact_eps)
-            # self.contact_dist = (
-            #     self.allegro_hand_dof_positions[:, self.allegro_digits_actuated_dof_indices] - self.object_targets[:, 7:]
-            # ).norm(p=1, dim=1) / len(self.allegro_actuated_dof_indices)
-            self.extras["contact_dist"] = self.contact_dist.clone()
-
-            if negative_part_reward:
-                contact_rew = -1.0 / contact_rew
-            if mutual:
-                return contact_rew
-
-            if self.relative_part_reward:
-                prox_pos_dist = torch.tensor(0.265, device=self.device)
-                prox_rot_dist = torch.tensor(1.0, device=self.device)
-                prox_pos_coff = 1 - torch.min(self.pos_dist, prox_pos_dist) / prox_pos_dist
-                prox_rot_coff = 1 - torch.min(self.rot_dist, prox_rot_dist) / prox_rot_dist
-            else:
-                prox_pos_coff = 1.0
-                prox_rot_coff = 1.0
-
-            self.contact_rew_scaled = (
-                prox_pos_coff * prox_rot_coff * contact_rew * self.rot_reward_scale * self.part_reward_scale
-            )
-        elif "pclcontact" in self.reward_type:
-            contact_map = self.compute_contact_map(pcl_type="current")
-            target_contact_map = self.compute_contact_map(pcl_type="target")
-            if "pclcontactmatch" in self.reward_type:
-                self.contact_dist = torch.sum(target_contact_map != contact_map, 1) / hand_pcl_num
-            else:
-                self.contact_dist = F.pairwise_distance(contact_map, target_contact_map)
-            self.extras["contact_dist"] = self.contact_dist.clone()
-            contact_rew = 10.0 * self.contact_eps / (torch.abs(self.contact_dist) + self.contact_eps)
-            if negative_part_reward:
-                contact_rew = -1.0 / contact_rew
-            if mutual:
-                return contact_rew
-            self.contact_rew_scaled = contact_rew * self.contact_reward_scale * self.part_reward_scale
 
     def compute_mutual_reward(self):
         if self.env_mode == "relpose":
@@ -3109,21 +2283,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
                 self.envs[succ_env_id], self.table_indices[succ_env_id], 0, gymapi.MESH_VISUAL, gymapi.Vec3(*color)
             )
 
-    def compute_action_reward(self, actions):
-        if self.action_penalty_scale < 0:
-            action_penalty = torch.sum(actions**2, dim=-1)
-            self.action_penalty_scaled = action_penalty * self.action_penalty_scale
-        elif self.wrist_action_penalty_scale < 0:
-            action_penalty = torch.sum(self.allegro_dof_speeds[:2] ** 2, dim=-1)
-            self.action_penalty_scaled = action_penalty * self.wrist_action_penalty_scale
-        elif self.arm_action_penalty_scale < 0:
-            ur_action = torch.cat([self.eef_translation, self.eef_rotation], dim=1)
-            action_penalty = torch.sum(ur_action**2, dim=-1)
-            self.action_penalty_scaled = action_penalty * self.arm_action_penalty_scale
-        else:
-            action_penalty = torch.sum(actions**2, dim=-1)
-            self.action_penalty_scaled = action_penalty * 0
-
     def compute_reach_reward(self):
         """Compute reach reward - reward for reaching the target object."""
         # max(d_closest - d, 0) d is between mean position for fingertips and target object
@@ -3215,78 +2374,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             self.extras["nominal_dist"] = self.nominal_dist.clone()
             self.nominal_rew_scaled = nominal_rew
             self.extras["nominal_rew"] = self.nominal_rew_scaled.clone()
-
-    def compute_similarity_reward(self):
-        curr_endeffector_positions = self.endeffector_positions.clone()
-        curr_endeffector_orientations = self.endeffector_orientations.clone()
-        curr_endeffector_orientations_euler = torch.stack(get_euler_xyz(curr_endeffector_orientations), dim=1)
-        curr_allegro_actuated_dof_positions = self.allegro_hand_dof_positions[:, self.allegro_actuated_dof_indices].clone()
-
-        curr_endeffector_orientations_norm = torch.arccos(torch.cos(curr_endeffector_orientations_euler))
-        prev_endeffector_orientations_norm = torch.arccos(torch.cos(self.prev_endeffector_orientations_euler))
-
-        diff_endeffector_positions = curr_endeffector_positions - self.prev_endeffector_positions
-        diff_endeffector_orientations = curr_endeffector_orientations_norm - prev_endeffector_orientations_norm
-        diff_allegro_actuated_dof_positions = (
-            curr_allegro_actuated_dof_positions - self.prev_allegro_actuated_dof_positions
-        )
-
-        delta_arm_pos_state = diff_endeffector_positions
-        delta_arm_rot_state = diff_endeffector_orientations
-        delta_hand_state = diff_allegro_actuated_dof_positions
-
-        arm_pos_similarity = (
-            delta_arm_pos_state
-            * self.action_gf[:, self.arm_trans_action_indices]
-            / (abs(self.action_gf[:, self.arm_trans_action_indices]) + 1e-5)
-        ) / (self._max_xarm_endeffector_pos_vel * self.dt)
-        arm_rot_similarity = (
-            delta_arm_rot_state
-            * self.action_gf[:, self.arm_rot_action_indices]
-            / (abs(self.action_gf[:, self.arm_rot_action_indices]) + 1e-5)
-        ) / (self._max_xarm_endeffector_rot_vel * self.dt)
-        hand_similarity = (
-            delta_hand_state
-            * self.action_gf[:, self.hand_action_indices]
-            / (abs(self.action_gf[:, self.hand_action_indices]) + 1e-5)
-        ) / (self.dof_speed_scale * self.dt)
-
-        similarity_reward = (
-            torch.sum(torch.cat([arm_pos_similarity, arm_rot_similarity, hand_similarity], -1), -1) / self.num_actions
-        )
-        if "decay_similarity" in self.reward_type:
-            decrease_ratio = 1 - self.progress_buf / self.max_episode_length
-        elif "dist_similarity" in self.reward_type:
-            rot_dist_scale = self.rot_eps / (self.rot_dist + self.rot_eps)
-            pos_dist_scale = (self.rot_eps / trans_scale) / (self.pos_dist + self.rot_eps / trans_scale)
-            decrease_ratio = 1 - torch.min(rot_dist_scale, pos_dist_scale)
-        elif "dedi_similarity" in self.reward_type:
-            rot_dist_scale = self.rot_eps / (self.rot_dist + self.rot_eps)
-            pos_dist_scale = (self.rot_eps / trans_scale) / (self.pos_dist + self.rot_eps / trans_scale)
-            dist_decrease_ratio = 1 - torch.min(rot_dist_scale, pos_dist_scale)
-            decay_decrease_ratio = 1 - self.progress_buf / self.max_episode_length
-            decrease_ratio = decay_decrease_ratio * dist_decrease_ratio
-        else:
-            decrease_ratio = 1
-        self.similarity_reward_scaled = similarity_reward * self.similarity_reward_scale * decrease_ratio
-        self.extras["similarity_reward"] = self.similarity_reward_scaled.clone()
-        # TODO smaller change no need to consider as diff
-        self.extras["diff_direction"] = torch.sum(
-            torch.sign(torch.cat([arm_pos_similarity, arm_rot_similarity, hand_similarity], -1)) < 0 
-            * (abs(torch.cat([arm_pos_similarity, arm_rot_similarity, hand_similarity], -1)) > 0.01), -1,
-        )
-        # arm pos diff direction
-        self.extras["arm_pos_diff_direction"] = torch.sum(
-            torch.sign(arm_pos_similarity) < 0 * (abs(arm_rot_similarity) > 0.01), -1
-        ).to(torch.float32)
-        # arm rot diff direction
-        self.extras["arm_rot_diff_direction"] = torch.sum(
-            (torch.sign(arm_rot_similarity) < 0) * (abs(arm_rot_similarity) > 0.01), -1
-        ).to(torch.float32)
-        # hand diff direction
-        self.extras["hand_diff_direction"] = torch.sum(
-            (torch.sign(hand_similarity) < 0) * (abs(hand_similarity) > 0.01), -1
-        ).to(torch.float32)
 
     def compute_manipulability_penalty(self):
         J = torch.linalg.det(self.j_eef)
@@ -3429,22 +2516,12 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
     def compute_done(self):
         if not test_sim:
-            # if len(self.arm_roll_action_indices) == 0:
-            if self.env_mode == "pgm":
-                fall_env_mask = (
-                    (self.object_root_positions[:, 2] < self._table_pose[2] - 0.1)
-                )
-                arm_contact_mask = (self.arm_contact_forces.norm(p=2, dim=2) > 1).any(dim=1)
+            fall_env_mask = (
+                (self.object_root_positions[:, 2] < self._table_pose[2] - 0.1)
+            )
+            arm_contact_mask = (self.floating_fingertip_net_contact_forces.norm(p=2, dim=2) > 1).any(dim=1)
 
-                failed_env_ids = (fall_env_mask | arm_contact_mask).nonzero(as_tuple=False).squeeze(-1)
-            else:
-                fall_env_mask = (
-                    (self.object_root_positions[:, 2] < self.allegro_hand_center_positions[:, 2] - 0.2)
-                )
-                arm_contact_mask = (self.arm_contact_forces.norm(p=2, dim=2) > 1).any(dim=1)
-
-                failed_env_ids = (fall_env_mask | arm_contact_mask).nonzero(as_tuple=False).squeeze(-1)
-
+            failed_env_ids = (fall_env_mask | arm_contact_mask).nonzero(as_tuple=False).squeeze(-1)
 
             self.reset_buf[failed_env_ids] = 1
 
@@ -3465,127 +2542,10 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
     def compute_reward(self, actions: Tensor) -> None:
         self.reset_buf[:] = torch.where(self.progress_buf >= self.max_episode_length - 1, 1, self.reset_buf)
         self.done_successes[self.reset_buf.nonzero(as_tuple=False).squeeze(-1)] = 0
+        
+        self.compute_singulation_success_reward()
 
-        # if "tilt" in self.reward_type:
-        #     self.compute_tilt_reward()
-        if "slide" in self.reward_type:
-            self.compute_slide_reward()
-        # if "neighbor" in self.reward_type:
-        #     self.compute_neighbor_stability_penalty()
-        # if "stability" in self.reward_type:
-        #     self.compute_stability_penalty()
-
-        # Use new singulation success criteria instead of old success reward
-        # self.compute_singulation_success_reward()
-
-        self.compute_reach_reward()
-        self.compute_pick_reward()
-        self.compute_targ_reward()
-
-        # self.compute_action_reward(actions)
-        # if "nominal" in self.reward_type:
-        #     self.compute_reorient_obj_reward()
-        # if "ft2oc" in self.reward_type:
-        #     self.compute_fingertip_to_obj_center_reward()
-        # if "similarity" in self.reward_type:
-        #     self.compute_similarity_reward()
-        # if "manipen" in self.reward_type:
-        #     self.compute_manipulability_penalty()
-        # if self.env_mode == "pgm" and "height" in self.reward_type:
-        #     self.compute_height_reward()
-        #     self.extras["obj_height"] = self.delta_obj_height.clone()
-        #     self.extras["height_rew"] = self.height_rew_scaled.clone()
-
-        # self.extras["rot_rew"] = self.rot_rew_scaled.clone()
-        # self.extras["succ_rew"] = self.succ_rew_scaled.clone()
-        # self.extras["action_penalty"] = self.action_penalty_scaled.clone()
-
-        # # Log singulation-specific rewards
-        # if "tilt" in self.reward_type:
-        #     self.extras["tilt_rew"] = self.tilt_reward_scaled.clone()
-        # if "slide" in self.reward_type:
-        #     self.extras["slide_rew"] = self.slide_reward_scaled.clone()
-        # if "neighbor" in self.reward_type:
-        #     self.extras["neighbor_penalty"] = self.neighbor_stability_penalty_scaled.clone()
-        # if "stability" in self.reward_type:
-        #     self.extras["stability_penalty"] = self.stability_penalty_scaled.clone()
-
-        # # Log debug info for singulation
-        # if hasattr(self, 'x_rotation_error'):
-        #     self.extras["x_rotation_error"] = self.x_rotation_error.clone()
-        # if hasattr(self, 'y_rotation_error'):
-        #     self.extras["y_rotation_error"] = self.y_rotation_error.clone()
-        # if hasattr(self, 'z_rotation_error'):
-        #     self.extras["z_rotation_error"] = self.z_rotation_error.clone()
-        # if hasattr(self, 'y_rotation_normalized'):
-        #     self.extras["y_rotation_normalized"] = self.y_rotation_normalized.clone()
-        # if hasattr(self, 'z_rotation_normalized'):
-        #     self.extras["z_rotation_normalized"] = self.z_rotation_normalized.clone()
-        # if hasattr(self, 'z_displacement'):
-        #     self.extras["z_displacement"] = self.z_displacement.clone()
-        # if hasattr(self, 'neighbor_displacement'):
-        #     self.extras["neighbor_displacement"] = self.neighbor_displacement.clone()
-
-        self.rew_buf[:] = (
-            self.reach_rew_scaled + self.pick_rew_scaled + self.targ_rew_scaled
-        )
-
-        # Add singulation-specific rewards
-        if "tilt" in self.reward_type:
-            self.rew_buf[:] += self.tilt_reward_scaled
-        if "slide" in self.reward_type:
-            self.rew_buf[:] += self.slide_reward_scaled
-        if "neighbor" in self.reward_type:
-            self.rew_buf[:] += self.neighbor_stability_penalty_scaled
-        if "stability" in self.reward_type:
-            self.rew_buf[:] += self.stability_penalty_scaled
-
-        # Debug final reward composition periodically
-        # if self.env_info_logging and hasattr(self, 'progress_buf') and self.progress_buf[0] % 100 == 0:
-        #     print(f"\n=== REWARD BREAKDOWN (env 0, step {self.progress_buf[0]}) ===")
-        #     print(f"Total reward: {self.rew_buf[0].item():.4f}")
-        #     print(f"Success reward: {self.succ_rew_scaled[0].item():.4f}")
-        #     print(f"Action penalty: {self.action_penalty_scaled[0].item():.4f}")
-        #     if "tilt" in self.reward_type:
-        #         print(f"Tilt reward: {self.tilt_reward_scaled[0].item():.4f}")
-        #     if "slide" in self.reward_type:
-        #         print(f"Slide reward: {self.slide_reward_scaled[0].item():.4f}")
-        #     if "neighbor" in self.reward_type:
-        #         print(f"Neighbor penalty: {self.neighbor_stability_penalty_scaled[0].item():.4f}")
-        #     if hasattr(self, 'rot_rew_scaled'):
-        #         print(f"Rotation reward: {self.rot_rew_scaled[0].item():.4f}")
-        #     if hasattr(self, 'pos_rew_scaled'):
-        #         print(f"Position reward: {self.pos_rew_scaled[0].item():.4f}")
-        #     if hasattr(self, 'contact_rew_scaled'):
-        #         print(f"Contact reward: {self.contact_rew_scaled[0].item():.4f}")
-        #     print(f"================================================\n")
-
-        # Legacy reward terms (keep for backward compatibility)
-        # if hasattr(self, 'rot_rew_scaled'):
-        #     self.rew_buf[:] += self.rot_rew_scaled
-
-        # if not test_rel and self.env_mode == "relpose":
-        #     self.rew_buf[:] += self.pos_rew_scaled
-        # if self.env_mode == "relposecontact" or self.env_mode == "pgm":
-        #     if "pclcontactonly" in self.reward_type or "pclcontactmatch" in self.reward_type:
-        #         self.rew_buf[:] = (
-        #             self.contact_rew_scaled + self.succ_rew_scaled + self.action_penalty_scaled + self.time_step_penatly
-        #         )
-        #     else:
-        #         self.rew_buf[:] += self.pos_rew_scaled + self.contact_rew_scaled
-
-        #     if self.env_mode == "pgm" and "height" in self.reward_type:
-        #         self.rew_buf[:] += self.height_rew_scaled
-        #     if "nominal" in self.reward_type:
-        #         self.rew_buf[:] += self.nominal_rew_scaled
-        #     if "ft2oc" in self.reward_type:
-        #         self.rew_buf[:] += self.ft2oc_rew_scaled
-        #     if "similarity" in self.reward_type:
-        #         self.rew_buf[:] += self.similarity_reward_scaled * (
-        #             self.progress_buf % self.similarity_reward_freq == 0
-        #         )
-        #     if "manipen" in self.reward_type:
-        #         self.rew_buf[:] += self.manipulability_penalty_scaled
+        self.rew_buf[:] = 0
 
         self.compute_done()
 
@@ -3685,86 +2645,19 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
                 self.nominal_env_ratio = 0.2
                 self.curriculum_mode = "no"
 
-        # Comment out target hand pose setup since we don't need it for singulation
-        # reset target object root state
-        # target_occupied_object_init_root_position = position(
-        #     self.gym_assets["target"]["objects"]["occupied_pose"], self.device
-        # )
-
-        # reset target allegro-hand dof positions & velocities
-
-        # do not set wrist angle for target!!!
-        # do not use current hand pose for compute target!!!
-        # allegro_hand_root_position = self._target_hand_palm_pose[:3].reshape(-1, 3).repeat(num_reset_envs, 1)
-        # allegro_hand_root_orientation = self._target_hand_palm_pose[3:7].reshape(-1, 4).repeat(num_reset_envs, 1)
-
-        # object_positions_wrt_palm = poses[:, 0:3]
-        # object_orientations_wrt_palm = poses[:, 3:7]
-
-        # palm_orientations_wrt_object, palm_positions_wrt_object = transformation_inverse(
-        #     object_orientations_wrt_palm, object_positions_wrt_palm
-        # )
-
-        # # TODO change to forearm pose
-        # object_orientation, object_position = transformation_multiply(
-        #     allegro_hand_root_orientation,
-        #     allegro_hand_root_position,
-        #     object_orientations_wrt_palm,
-        #     object_positions_wrt_palm,
-        # )
-
-        # ii, jj = torch.meshgrid(env_ids, self.grasping_joint_indices[2:], indexing="ij")
-        # self._r_target_object_positions_wrt_palm[env_ids] = poses[:, 0:3]
-        # self._r_target_object_orientations_wrt_palm[env_ids] = poses[:, 3:7]
-        # self._r_target_allegro_dof_positions[ii, jj] = joints[:, 2:]
-        # self._r_target_object_root_orientations[env_ids] = object_orientation
-        # self._r_target_object_root_positions[env_ids] = object_position
-        # self._r_target_palm_positions_wrt_object[env_ids] = palm_positions_wrt_object
-        # self._r_target_palm_orientations_wrt_object[env_ids] = palm_orientations_wrt_object
-
-        # ii, jj = torch.meshgrid(env_ids, self.allegro_digits_actuated_dof_indices - 6, indexing="ij")
-        # self._r_target_allegro_digits_actuated_dof_positions[env_ids] = self._r_target_allegro_dof_positions[
-        #     ii, jj
-        # ].clone()
-
-        # ii, jj = torch.meshgrid(env_ids, self.allegro_fingers_actuated_dof_indices - 6, indexing="ij")
-        # self._r_target_allegro_fingers_actuated_dof_positions[env_ids] = self._r_target_allegro_dof_positions[
-        #     ii, jj
-        # ].clone()
-
-        # ii, jj = torch.meshgrid(env_ids, self.allegro_thumb_actuated_dof_indices - 6, indexing="ij")
-        # self._r_target_allegro_thumb_actuated_dof_positions[env_ids] = self._r_target_allegro_dof_positions[
-        #     ii, jj
-        # ].clone()
-
-        # print(self._r_target_allegro_dof_positions.shape, self.target_allegro_hand_dof_positions.shape)
-
-        # Comment out target setting since we don't need it for singulation
-        # if self.env_mode == "orn":
-        #     self.object_targets[env_ids] = object_orientation.clone()
-        # elif self.env_mode == "relpose":
-        #     self.object_targets[env_ids] = poses.clone()
-        # elif self.env_mode == "relposecontact" or self.env_mode == "pgm":
-        #     self.object_targets[env_ids, :7] = poses.clone()
-        #     self.object_targets[env_ids, 7:25] = self._r_target_allegro_digits_actuated_dof_positions[env_ids]
-
-
         # TODO: add noise to the initial DOF positions
-        dof_init_positions = self.gym_assets["current"]["robot"]["init"]["position"]
+        # dof_init_positions = self.gym_assets["current"]["robot"]["init"]["position"]
+        
+        # set floating fingertip at the top center of the object
+        dof_init_positions = self.floating_fingertip_dof_init_positions_per_env[env_ids, :].clone()
+        # breakpoint()
+        
         dof_init_velocities = self.gym_assets["current"]["robot"]["init"]["velocity"]
-        self.allegro_hand_dof_positions[env_ids, :] = dof_init_positions
-        self.allegro_hand_dof_velocities[env_ids, :] = dof_init_velocities
+        self.floating_fingertip_dof_positions[env_ids, :] = dof_init_positions
+        self.floating_fingertip_dof_velocities[env_ids, :] = dof_init_velocities
 
         self.prev_targets[env_ids] = dof_init_positions
         self.curr_targets[env_ids] = dof_init_positions
-
-        # random object orientation
-        # if self.reset_obj_ori_noise > 0:
-        #     occupied_object_init_root_orientation = random_orientation_within_angle(
-        #         num_reset_envs, self.device, object_orientation, self.reset_obj_ori_noise / (180 / torch.pi)
-        #     )
-        # else:
-        #     occupied_object_init_root_orientation = random_orientation(num_reset_envs, self.device)
 
         # For singulation task, use nominal orientation (no rotation) for all boxes
         occupied_object_init_root_orientation = torch.tensor(self._object_nominal_orientation, device=self.device).repeat(num_reset_envs, 1)
@@ -3796,7 +2689,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.robot_init_dof[env_ids, :] = dof_init_positions.clone()
 
         # Set dof-position-targets & dof-states
-        indices = self.allegro_hand_indices[env_ids]
+        indices = self.floating_fingertip_indices[env_ids]
         indices = indices.flatten().to(torch.int32)
 
         self.gym.set_dof_position_target_tensor_indexed(
@@ -3860,153 +2753,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             return metainfo[field]
         return pd.DataFrame(metainfo)
 
-    def set_states(
-        self,
-        robot_dof,
-        object_targets=None,
-        obj_pos=None,
-        obj_orn=None,
-        env_ids=None,
-        step_time=-1,
-        denomalize_robot_dof=False,
-        set_dof_state=True,
-        arm_ik=False,
-    ):
-        if env_ids is None:
-            env_ids = torch.arange(start=0, end=self.num_envs, device=self.device, dtype=torch.long)
-        else:
-            env_ids = env_ids.to(self.device)
-
-        if object_targets is not None and obj_pos is not None and obj_orn is not None:
-            self.object_targets[env_ids] = object_targets
-            # these are used for reward computation
-            self._r_target_object_positions_wrt_palm[env_ids] = object_targets[:, :3]
-            self._r_target_object_orientations_wrt_palm[env_ids] = object_targets[:, 3:7]
-            ii, jj = torch.meshgrid(env_ids, self.allegro_digits_actuated_dof_indices - 6, indexing="ij")
-            self._r_target_allegro_dof_positions[ii, jj] = object_targets[:, 7:25]
-
-            self.occupied_object_init_root_positions[env_ids, :] = obj_pos
-            self.occupied_object_init_root_orientations[env_ids, :] = obj_orn
-
-            self.root_positions[self.occupied_object_indices[env_ids], :] = obj_pos
-            self.root_orientations[self.occupied_object_indices[env_ids], :] = obj_orn
-
-            indices = torch.unique((self.object_indices[env_ids]).flatten().to(torch.int32))
-            self.gym.set_actor_root_state_tensor_indexed(
-                self.sim,
-                gymtorch.unwrap_tensor(self.root_states),
-                gymtorch.unwrap_tensor(indices),
-                indices.shape[0],
-            )
-
-        if arm_ik:
-            targets = self.prev_targets.clone()
-
-            cur_pos = self.endeffector_positions.clone()
-            cur_quat = self.endeffector_orientations.clone()
-            arm_pos = robot_dof[:, self.arm_trans_action_indices].clone()
-            arm_rot_euler = robot_dof[:, self.arm_rot_action_indices].clone()
-            arm_rot_quat = quat_from_euler_xyz(arm_rot_euler[:, 0], arm_rot_euler[:, 1], arm_rot_euler[:, 2])
-            hand_target_dof = robot_dof[:, self.hand_action_indices]
-            delta_joint_move = ik(
-                self.j_eef,
-                cur_pos,
-                cur_quat,
-                arm_pos,
-                arm_rot_quat,
-            )
-            arm_target_dof = targets[:, self.ur_actuated_dof_indices] + delta_joint_move
-
-            current_dof = targets.clone()
-            current_dof[:, self.allegro_actuated_dof_indices] = hand_target_dof
-            current_dof[:, self.allegro_tendon_dof_indices] = saturate(
-                current_dof[:, self.allegro_coupled_dof_indices]
-                - self.gym_assets["current"]["robot"]["limits"]["upper"][self.allegro_coupled_dof_indices],
-                self.gym_assets["current"]["robot"]["limits"]["lower"][self.allegro_tendon_dof_indices],
-                self.gym_assets["current"]["robot"]["limits"]["upper"][self.allegro_tendon_dof_indices],
-            )
-            robot_dof = current_dof.clone()
-            robot_dof[:, self.ur_actuated_dof_indices] = arm_target_dof
-
-            robot_dof = saturate(
-                robot_dof,
-                self.gym_assets["current"]["robot"]["limits"]["lower"],
-                self.gym_assets["current"]["robot"]["limits"]["upper"],
-            )
-
-        if denomalize_robot_dof:
-            robot_dof = denormalize(
-                robot_dof,
-                self.gym_assets["current"]["robot"]["limits"]["lower"],
-                self.gym_assets["current"]["robot"]["limits"]["upper"],
-            )
-
-        if set_dof_state:
-            self.allegro_hand_dof_positions[env_ids, :] = robot_dof
-        self.prev_targets[env_ids] = robot_dof
-        self.curr_targets[env_ids] = robot_dof
-
-        indices = torch.unique((self.allegro_hand_indices[env_ids]).flatten().to(torch.int32))
-        self.gym.set_dof_position_target_tensor_indexed(
-            self.sim,
-            gymtorch.unwrap_tensor(self.curr_targets_buffer),
-            gymtorch.unwrap_tensor(indices),
-            indices.shape[0],
-        )
-
-        if set_dof_state:
-            self.gym.set_dof_state_tensor_indexed(
-                self.sim, gymtorch.unwrap_tensor(self.dof_states), gymtorch.unwrap_tensor(indices), indices.shape[0]
-            )
-
-        if step_time > 0:
-            self.step_simulation(step_time)
-
-        self.compute_observations()
-
-    def move_arm_to_pose(self, position, orientation):
-        for _ in range(100):
-            targets = self.prev_targets.clone()
-
-            cur_pos = self.endeffector_positions.clone()
-            cur_quat = self.endeffector_orientations.clone()
-
-            delta_joint_move = ik(self.j_eef, cur_pos, cur_quat, position, orientation) * self.dof_speed_scale * self.dt
-
-            self.curr_targets[:, self.ur_actuated_dof_indices] = (
-                targets[:, self.ur_actuated_dof_indices] + delta_joint_move
-            )
-
-            self.curr_targets[:] = saturate(
-                self.curr_targets,
-                self.gym_assets["current"]["robot"]["limits"]["lower"],
-                self.gym_assets["current"]["robot"]["limits"]["upper"],
-            )
-            self.prev_targets[:] = self.curr_targets[:]
-
-            indices = torch.unique(
-                torch.cat([self.allegro_hand_indices, self.target_allegro_hand_indices]).flatten().to(torch.int32)
-            )
-
-            self.gym.set_dof_position_target_tensor_indexed(
-                self.sim,
-                gymtorch.unwrap_tensor(self.curr_targets_buffer),
-                gymtorch.unwrap_tensor(indices),
-                indices.shape[0],
-            )
-
-            # step physics and render each frame
-            for i in range(self.control_freq_inv):
-                if self.force_render:
-                    self.render()
-                self.gym.simulate(self.sim)
-
-            # to fix!
-            if self.device == "cpu":
-                self.gym.fetch_results(self.sim, True)
-
-            self._refresh_sim_tensors()
-
     def _refresh_action_tensors(self, actions: torch.Tensor) -> None:
         """Given a batch of actions, refresh the action tensors.
 
@@ -4019,6 +2765,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             current += spec.dim
 
     def pre_physics_step(self, actions: torch.Tensor) -> None:
+        actions = torch.zeros_like(actions)
+        
         if self.training:
             self.reset_done()
 
@@ -4040,84 +2788,18 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         self.actions = actions.clone().to(self.device)
         self.clamped_actions = actions.clone().to(self.device)
-        self.prev_endeffector_states = self.endeffector_states.clone()
-        self.prev_endeffector_positions = self.endeffector_positions.clone()
-        self.prev_endeffector_orientations = self.endeffector_orientations.clone()
-        self.prev_endeffector_orientations_euler = torch.stack(get_euler_xyz(self.prev_endeffector_orientations), dim=1)
-        self.prev_allegro_actuated_dof_positions = self.allegro_hand_dof_positions[
-            :, self.allegro_actuated_dof_indices
+
+        self.prev_floating_fingertip_actuated_dof_positions = self.floating_fingertip_dof_positions[
+            :, self.actuated_dof_indices
         ].clone()
         self._refresh_action_tensors(self.actions)
-
-        if self.use_relative_control:
-            print(111)
-            breakpoint()
-            targets = self.prev_targets.clone()
-            if self.ur_control_type == "osc":
-                xarm_dof_movements, self.target_eef_pos, self.target_eef_euler = compute_relative_xarm_dof_positions(
-                    self.endeffector_positions,
-                    self.endeffector_orientations,
-                    self.j_eef,
-                    self.eef_translation,
-                    self.eef_rotation,
-                    self._max_xarm_endeffector_pos_vel,
-                    self._max_xarm_endeffector_rot_vel,
-                    self.dt,
-                )
-            else:
-                xarm_dof_speeds = torch.cat([self.eef_translation, self.eef_rotation], dim=1)
-                xarm_dof_movements = xarm_dof_speeds * self.dof_speed_scale * self.dt
-
-            if getattr(self, "eef_translation", None) is None and getattr(self, "eef_rotation", None) is None:
-                xarm_dof_movements[:] = 0
-
-            self.curr_targets[:, self.xarm_actuated_dof_indices] = (
-                targets[:, self.xarm_actuated_dof_indices] + xarm_dof_movements
-            )
-
-            if getattr(self, "allegro_dof_speeds", None) is not None:
-                # hand moving
-                # targets[:, self.allegro_coupled_dof_indices] = (
-                #     targets[:, self.allegro_coupled_dof_indices] + targets[:, self.allegro_tendon_dof_indices]
-                # )
-                if self.use_predef_hand_pose:
-                    self.curr_targets[
-                        :, self.allegro_actuated_dof_indices
-                    ] = torch.tensor(
-                        self._allegro_hand_predef_qpos,
-                        device=self.device,
-                        dtype=torch.float,
-                    )
-                else:
-                    self.curr_targets[:, self.allegro_actuated_dof_indices] = (
-                        targets[:, self.allegro_actuated_dof_indices]
-                        + self.allegro_dof_speeds * self.dof_speed_scale * self.dt
-                    )
-                # self.curr_targets[:, self.allegro_tendon_dof_indices] = saturate(
-                #     self.curr_targets[:, self.allegro_coupled_dof_indices]
-                #     - self.gym_assets["current"]["robot"]["limits"]["upper"][self.allegro_coupled_dof_indices],
-                #     self.gym_assets["current"]["robot"]["limits"]["lower"][self.allegro_tendon_dof_indices],
-                #     self.gym_assets["current"]["robot"]["limits"]["upper"][self.allegro_tendon_dof_indices],
-                # )
-        else:
-            print(222)
-            # simulate the tendon coupling
-            self.curr_targets[:, self.actuated_dof_indices] = self.actions
-            self.curr_targets[:, self.allegro_tendon_dof_indices] = (
-                torch.clamp_min(self.curr_targets[:, self.allegro_coupled_dof_indices], 0.0) * 2.0 - 1.0
-            )
-            self.curr_targets[:, self.allegro_coupled_dof_indices] = (
-                torch.clamp_max(self.curr_targets[:, self.allegro_coupled_dof_indices], 0.0) * 2.0 + 1.0
-            )
-            # denormalize & saturate the targets
-            self.curr_targets[:] = denormalize(
-                self.curr_targets,
-                self.gym_assets["current"]["robot"]["limits"]["lower"],
-                self.gym_assets["current"]["robot"]["limits"]["upper"],
-            )
-            self.curr_targets[:] = (
-                self.act_moving_average * self.curr_targets + (1.0 - self.act_moving_average) * self.prev_targets
-            )
+        
+        targets = self.prev_targets.clone()
+        
+        self.curr_targets[:, self.actuated_dof_indices] = (
+            targets[:, self.actuated_dof_indices]
+            + self.floating_fingertip_dof_speeds * self.dof_speed_scale * self.dt
+        )
 
         self.curr_targets[:] = saturate(
             self.curr_targets,
@@ -4125,12 +2807,9 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             self.gym_assets["current"]["robot"]["limits"]["upper"],
         )
 
-        # return
-        if test_sim:
-            self.curr_targets[:, 6:] = self.gym_assets["current"]["robot"]["limits"]["lower"][6:]
         self.prev_targets[:] = self.curr_targets[:]
 
-        indices = self.allegro_hand_indices
+        indices = self.floating_fingertip_indices
         indices = indices.flatten().to(torch.int32)
         self.gym.set_dof_position_target_tensor_indexed(
             self.sim,
@@ -4138,16 +2817,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             gymtorch.unwrap_tensor(indices),
             indices.shape[0],
         )
-
-        # self.target_allegro_hand_dof_positions[:] = self.curr_target_targets[:]
-        # self.target_allegro_hand_dof_velocities[:] = 0.0
-        # self.gym.set_dof_state_tensor_indexed(
-        #     self.sim,
-        #     gymtorch.unwrap_tensor(self.dof_states),
-        #     gymtorch.unwrap_tensor(self.target_allegro_hand_indices.to(torch.int32)),
-        #     self.num_envs,
-        # )
-
+        
     def post_physics_step(self):
         self.progress_buf += 1
         self.randomize_buf += 1
@@ -4181,9 +2851,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             if self.enable_rendered_pointcloud_observation:
                 self.draw_camera_axes()
 
-            if self.enable_contact_sensors:
-                self.draw_force_sensor_axes()
-
     def reset_obj_vel(self, env_ids):
         # important reset object velocity and angular velocity to zero
         occupied_object_indices = torch.unique(torch.cat([self.occupied_object_indices[env_ids]]).to(torch.int32))
@@ -4197,78 +2864,14 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             len(occupied_object_indices),
         )
 
-    def lift_test(self, env_ids, close_dis=0.1, close_dof_indices=None, only_evaluate_height=False):
-        # TODO: finger will lose during the lifting?
-        # generate stable grasp
-        # if close_dof_indices is None:
-        #     close_dof_indices = self.close_dof_indices.clone()
-
-        # self.curr_targets[env_ids, :] = self.allegro_hand_dof_positions.clone()
-        # self.close(env_ids, close_dis, close_dof_indices)
-        # self.curr_targets[env_ids, :] = self.allegro_hand_dof_positions.clone()
-        # self.reset_obj_vel(env_ids)
-
-        current_pos = self.endeffector_positions.clone()
-        target_pos = current_pos.clone()
-        target_pos[:, 2] += 0.3
-
-        for i in range(100):
-            delta_joint_move = ik(
-                self.j_eef,
-                self.endeffector_positions,
-                self.endeffector_orientations,
-                target_pos,
-                self.endeffector_orientations,
-            )
-            delta_joint_move = delta_joint_move * self.dof_speed_scale * self.dt
-
-            targets = self.allegro_hand_dof_positions.clone()
-            ii, jj = torch.meshgrid(env_ids, self.ur_actuated_dof_indices, indexing="ij")
-            self.curr_targets[ii, jj] = targets[ii, jj] + delta_joint_move
-            # apply_forces = torch.zeros((self.num_envs, self.num_bodies, 3), device=self.device, dtype=torch.float)
-            # apply_forces[env_ids, self.allegro_center_index, 2] = 10
-            # self.gym.apply_rigid_body_force_tensors(
-            #     self.sim, gymtorch.unwrap_tensor(apply_forces), None, gymapi.ENV_SPACE
-            # )
-
-            # ii, jj = torch.meshgrid(env_ids, close_dof_indices)
-            # self.curr_targets[ii, jj] += 0.02
-
-            indices = torch.unique(
-                torch.cat([self.allegro_hand_indices, self.target_allegro_hand_indices]).flatten().to(torch.int32)
-            )
-            self.gym.set_dof_position_target_tensor_indexed(
-                self.sim,
-                gymtorch.unwrap_tensor(self.curr_targets_buffer),
-                gymtorch.unwrap_tensor(indices),
-                indices.shape[0],
-            )
-            # step physics and render each frame
-            for i in range(self.control_freq_inv):
-                if self.force_render:
-                    self.render()
-                self.gym.simulate(self.sim)
-
-            self._refresh_sim_tensors()
-
-            print(
-                F.pairwise_distance(
-                    self.allegro_hand_dof_positions[0, 6:],
-                    self.curr_targets_buffer[0, self.allegro_hand_dof_start : self.allegro_hand_dof_end][6:],
-                )
-            )
-        print("lifted")
-
-    # Visualization Utilities
-
     def close(self, env_ids, close_dis=0.3, close_dof_indices=None, check_contact=False):
         for i in range(50):
             if i < 30:
-                targets = self.allegro_hand_dof_positions.clone()
+                targets = self.floating_fingertip_dof_positions.clone()
                 ii, jj = torch.meshgrid(env_ids, close_dof_indices, indexing="ij")
                 self.curr_targets[ii, jj] = targets[ii, jj] + close_dis / 30
                 indices = torch.unique(
-                    torch.cat([self.allegro_hand_indices, self.target_allegro_hand_indices]).flatten().to(torch.int32)
+                    self.floating_fingertip_indices.flatten().to(torch.int32)
                 )
                 self.gym.set_dof_position_target_tensor_indexed(
                     self.sim,
@@ -4282,8 +2885,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             self._refresh_sim_tensors()
 
     def draw_force_sensor_axes(self) -> None:
-        positions: torch.Tensor = self.allegro_hand_rigid_body_positions[:, self.force_sensor_rigid_body_indices]
-        orientations: torch.Tensor = self.allegro_hand_rigid_body_orientations[:, self.force_sensor_rigid_body_indices]
+        positions: torch.Tensor = self.floating_fingertip_rigid_body_positions[:, self.force_sensor_rigid_body_indices]
+        orientations: torch.Tensor = self.floating_fingertip_rigid_body_orientations[:, self.force_sensor_rigid_body_indices]
         draw_boxes(self.gym, self.viewer, self.envs, positions, orientations, 0.001)
 
     def draw_camera_axes(self) -> None:
