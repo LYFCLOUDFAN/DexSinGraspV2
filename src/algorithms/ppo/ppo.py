@@ -97,7 +97,7 @@ class PPO:
         self.desired_kl = learn_cfg.get("desired_kl", None)
         self.schedule = learn_cfg.get("schedule", "fixed")
         self.step_size = learn_cfg["optim_stepsize"]
-        self.init_noise_std = learn_cfg.get("init_noise_std", 0.3)
+        self.init_noise_std = learn_cfg["init_noise_std"]
         self.normalize_input = learn_cfg["normalize_input"]
         self.normalize_value = learn_cfg["normalize_value"]
         self.model_cfg = self.cfg_train["policy"]
@@ -157,6 +157,9 @@ class PPO:
             in_pointnet_feature_dim=4,  # TODO
             args=args,
             stack_frame_number=self.vec_env.stack_frame_number,
+            actor_obs_normalization=self.normalize_input,
+            critic_obs_normalization=self.normalize_input,
+            obs_groups=None
         )
 
         # pointnet backbone
@@ -210,7 +213,8 @@ class PPO:
                 param.requires_grad = False
 
         self.optimizer = optim.Adam(
-            filter(lambda p: p.requires_grad, self.actor_critic.parameters()), lr=self.learning_rate
+            filter(lambda p: p.requires_grad, self.actor_critic.parameters()), lr=self.learning_rate, 
+            # eps=1e-5
         )
         """SDE."""
         if "gf" in self.vec_env.observation_info:
@@ -318,7 +322,8 @@ class PPO:
             label_type = self.vec_env.label_paths[0]
 
         if log_dir == "":
-            pass
+            self.writer = None
+            self.log_dir = None
         else:
             self.log_dir = f"./logs/{args.exp_name}/{time_now}_{log_dir}_objtype:{object_type}_labeltype:{label_type}_objnum:{self.vec_env.num_objects}_objcat:{self.vec_env.object_cat}_maxpercat:{self.vec_env.max_per_cat}_geo:{self.vec_env.object_geo_level}_scale:{self.vec_env.object_scale}_envnum:{self.vec_env.num_envs}_rewtype:{self.vec_env.reward_type}_seed{args.seed}"
 
@@ -366,14 +371,6 @@ class PPO:
     def restore_test(self, path):
         checkpoint = torch.load(path)
         self.actor_critic.load_state_dict(checkpoint["model"])
-        if self.normalize_input:
-            self.obs_running_mean_std.load_state_dict(
-                checkpoint["obs_running_mean_std"]
-            )
-        if self.normalize_value:
-            self.value_running_mean_std.load_state_dict(
-                checkpoint["value_running_mean_std"]
-            )
         self.set_test()
 
     def restore_train(self, path):
@@ -383,10 +380,6 @@ class PPO:
         self.actor_critic.load_state_dict(checkpoint["model"])
         if self.args.con:
             self.current_learning_iteration = int(path.split("_")[-1].split(".")[0])
-        if self.normalize_input:
-            self.obs_running_mean_std.load_state_dict(
-                checkpoint["obs_running_mean_std"]
-            )
         self.set_train()
 
     def set_test(self, vis=False):
@@ -400,11 +393,10 @@ class PPO:
     def save(self, path):
         weights = {
             "model": self.actor_critic.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "iteration": self.current_learning_iteration,
+            "tot_timesteps": self.tot_timesteps,
         }
-        if self.normalize_input:
-            weights["obs_running_mean_std"] = self.obs_running_mean_std.state_dict()
-        if self.normalize_value:
-            weights["value_running_mean_std"] = self.value_running_mean_std.state_dict()
         torch.save(weights, path)
 
     def get_action(self, current_obs, mode):
@@ -768,8 +760,9 @@ class PPO:
             print(f"eval_rewards: {eval_rews}")
             print(f"eval_eps_len: {np.mean(eps_len_all)}")
             print(f"eval_succ_eps_len: {np.mean(succ_eps_len_all)}")
-            self.writer.add_scalar("Eval/success_rate", sr_mu, it)
-            self.writer.add_scalar("Eval/eval_rews", eval_rews, it)
+            if self.writer is not None:
+                self.writer.add_scalar("Eval/success_rate", sr_mu, it)
+                self.writer.add_scalar("Eval/eval_rews", eval_rews, it)
 
     def train(self, num_learning_iterations, log_interval=1):
         # rewbuffer = deque(maxlen=100)
@@ -803,6 +796,8 @@ class PPO:
                     self.vec_env.action_gf = grad.clone()
                 next_obs, rews, dones, infos = self.vec_env.step(step_actions)
                 next_states = self.vec_env.get_state()
+                
+                self.actor_critic.update_normalization(next_obs["obs"])
 
                 rewards = rews.unsqueeze(-1)
 
@@ -849,12 +844,7 @@ class PPO:
             start = stop
             self.storage.compute_returns(last_values, self.gamma, self.lam)
 
-            if self.normalize_value:
-                self.value_running_mean_std.train()
-                all_values = self.storage.values.view(-1, 1)
-                _ = self.value_running_mean_std(all_values)
-
-            mean_value_loss, mean_surrogate_loss = self.update()
+            mean_value_loss, mean_surrogate_loss, mean_kl_loss = self.update()
             self.storage.clear()
             stop = time.time()
             learn_time = stop - start
@@ -864,7 +854,8 @@ class PPO:
                 self.set_test()
                 self.eval(it + 1)
                 self.set_train()
-                self.save(os.path.join(self.log_dir, "model_{}.pt".format(it + 1)))
+                if self.log_dir is not None:
+                    self.save(os.path.join(self.log_dir, "model_{}.pt".format(it + 1)))
 
                 current_obs = self.vec_env.reset()["obs"]
                 current_states = self.vec_env.get_state()
@@ -886,25 +877,28 @@ class PPO:
                     infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
                 if key == "success_num":
                     value = torch.sum(infotensor)
-                    self.writer.add_scalar("Episode/" + "total_success_num", value, locs["it"])
+                    if self.writer is not None:
+                        self.writer.add_scalar("Episode/" + "total_success_num", value, locs["it"])
                     ep_string += f"""{f'Total episode {key}:':>{pad}} {value:.4f}\n"""
                 value = torch.mean(infotensor)
-                self.writer.add_scalar("Episode/" + key, value, locs["it"])
+                if self.writer is not None:
+                    self.writer.add_scalar("Episode/" + key, value, locs["it"])
                 ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
         mean_std = self.actor_critic.log_std.exp().mean()
+        
+        if self.writer is not None:
+            self.writer.add_scalar("Loss/value_function", locs["mean_value_loss"], locs["it"])
+            self.writer.add_scalar("Loss/surrogate", locs["mean_surrogate_loss"], locs["it"])
+            self.writer.add_scalar("Loss/kl", locs["mean_kl_loss"], locs["it"])
+            self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
 
-        self.writer.add_scalar("Loss/value_function", locs["mean_value_loss"], locs["it"])
-        self.writer.add_scalar("Loss/surrogate", locs["mean_surrogate_loss"], locs["it"])
-        self.writer.add_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
-
-        if self.print_log:
             self.writer.add_scalar("Train/mean_reward", self.episode_rewards.get_mean(), locs["it"])
             self.writer.add_scalar("Train/mean_episode_length", self.episode_lengths.get_mean(), locs["it"])
             self.writer.add_scalar("Train/mean_reward/time", self.episode_rewards.get_mean(), self.tot_time)
             self.writer.add_scalar("Train/mean_episode_length/time",self.episode_lengths.get_mean(),self.tot_time,)
-
-        self.writer.add_scalar("Train2/mean_reward/step", locs["mean_reward"], locs["it"])
-        self.writer.add_scalar("Train2/mean_episode_length/episode", locs["mean_trajectory_length"], locs["it"])
+        
+            self.writer.add_scalar("Train2/mean_reward/step", locs["mean_reward"], locs["it"])
+            self.writer.add_scalar("Train2/mean_episode_length/episode", locs["mean_trajectory_length"], locs["it"])
 
         fps = int(self.num_transitions_per_env * self.vec_env.num_envs / (locs["collection_time"] + locs["learn_time"]))
 
@@ -951,6 +945,7 @@ class PPO:
     def update(self):
         mean_value_loss = 0
         mean_surrogate_loss = 0
+        mean_kl_loss = 0
 
         batch = self.storage.mini_batch_generator(self.num_mini_batches)
 
@@ -988,21 +983,7 @@ class PPO:
                     # demo_advantages_batch = self.demo_storage.advantages.view(-1, 1)[indices]
                     # demo_old_actions_log_prob_batch = self.demo_storage.actions_log_prob.view(-1, 1)[indices]
 
-                if self.normalize_input:
-                    self.obs_running_mean_std.eval()
-                    obs_batch = self.obs_running_mean_std(obs_batch)
-
-                (
-                    actions_log_prob_batch,
-                    entropy_batch,
-                    value_batch,
-                    mu_batch,
-                    sigma_batch,
-                ) = self.actor_critic.evaluate(obs_batch, states_batch, actions_batch)
-
-                if self.normalize_value:
-                    self.value_running_mean_std.eval()
-                    value_batch = self.value_running_mean_std(value_batch)
+                actions_log_prob_batch, entropy_batch, value_batch, mu_batch, sigma_batch = self.actor_critic.evaluate(obs_batch, states_batch, actions_batch)
 
                 if self.args.exp_name == "ilad":
                     """Evaulate demo."""
@@ -1091,12 +1072,14 @@ class PPO:
 
                 mean_value_loss += value_loss.item()
                 mean_surrogate_loss += surrogate_loss.item()
+                mean_kl_loss += kl_mean.item()
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
+        mean_kl_loss /= num_updates
 
-        return mean_value_loss, mean_surrogate_loss
+        return mean_value_loss, mean_surrogate_loss, mean_kl_loss
 
     """
     ILAD
@@ -1236,21 +1219,11 @@ class PPO:
         else:
             grad = torch.tensor([], device=self.device)
 
-        if self.normalize_input:
-            if mode == "train":
-                self.obs_running_mean_std.train()
-                normalized_current_obs = self.obs_running_mean_std(current_obs)
-            else:
-                self.obs_running_mean_std.eval()
-                normalized_current_obs = self.obs_running_mean_std(current_obs)
-        else:
-            normalized_current_obs = current_obs
-
         # pointnet fine-tuning
         if self.actor_critic.pcl_dim > 0 and self.pointnet_finetune:
-            batch_num = normalized_current_obs.size(0) // self.finetune_pointnet_bz + 1
+            batch_num = current_obs.size(0) // self.finetune_pointnet_bz + 1
             for batch_idx in range(batch_num):
-                obs_batch = normalized_current_obs[self.finetune_pointnet_bz * batch_idx : self.finetune_pointnet_bz * (batch_idx + 1)]
+                obs_batch = current_obs[self.finetune_pointnet_bz * batch_idx : self.finetune_pointnet_bz * (batch_idx + 1)]
 
                 if mode == "train":
                     actions_batch, actions_log_prob_batch, values_batch, mu_batch, sigma_batch = self.actor_critic.act(
@@ -1282,9 +1255,9 @@ class PPO:
                         actions = torch.cat([actions, actions_batch])
         else:
             if mode == "train":
-                actions, actions_log_prob, values, mu, sigma = self.actor_critic.act(normalized_current_obs, current_states)
+                actions, actions_log_prob, values, mu, sigma = self.actor_critic.act(current_obs, current_states)
             else:
-                actions = self.actor_critic.act_inference(normalized_current_obs)
+                actions = self.actor_critic.act_inference(current_obs)
 
         if mode == "train":
             # return original obs for storage

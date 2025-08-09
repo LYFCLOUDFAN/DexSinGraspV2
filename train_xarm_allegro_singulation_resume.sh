@@ -7,7 +7,7 @@ python src/train.py \
     headless=False \
     env_mode=pgm \
     env_info=True \
-    num_envs=2 \
+    num_envs=4096 \
     num_objects=5 \
     num_objects_per_env=5 \
     graphics_device_id=0 \
@@ -22,7 +22,10 @@ python src/train.py \
     physics_engine=physx \
     --seed=42 \
     --exp_name='PPO' \
-    --logdir='xarm_allegro_singulation_ppo' \
+    --logdir='xarm_allegro_singulation_ppo_safety_finetune_1e1_400_clip' \
+    --model_dir='/home/ruoyi/Work/UniDexFPM/logs/PPO/08-07-04-07_xarm_allegro_singulation_ppo_objtype:all_labeltype:box_grid_singulation_objnum:5_objcat:box_maxpercat:-1_geo:all_scale:all_envnum:4096_rewtype:succrew+tilt+slide+neighbor+actionpen_seed42' \
+    --resume_iter=20000 \
+    --con \
     --run_device_id=0 \
     --run_device_id=0 \
     --web_visualizer_port=-1

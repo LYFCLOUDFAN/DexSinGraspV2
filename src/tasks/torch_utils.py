@@ -146,7 +146,34 @@ def quat_diff_rad(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     b_conj = quat_conjugate(b)
     mul = quat_mul(a, b_conj)
     # 2 * torch.acos(torch.abs(mul[:, -1]))
+    # return 2.0 * torch.asin(torch.clamp(torch.norm(torch.abs(mul[:, 0:3]), p=2, dim=-1), max=1.0))
     return 2.0 * torch.asin(torch.clamp(torch.norm(mul[:, 0:3], p=2, dim=-1), max=1.0))
+
+@torch.jit.script
+def quat_diff_rad_normalized(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Get the difference in radians between two quaternions.
+
+    Args:
+        a: first quaternion, shape (N, 4)
+        b: second quaternion, shape (N, 4)
+    Returns:
+        Difference in radians, shape (N,)
+    """
+    # Normalize quaternions to ensure they're unit quaternions
+    a_norm = a / torch.norm(a, p=2, dim=-1, keepdim=True)
+    b_norm = b / torch.norm(b, p=2, dim=-1, keepdim=True)
+    
+    # Compute relative rotation quaternion
+    b_conj = quat_conjugate(b_norm)
+    mul = quat_mul(a_norm, b_conj)
+    
+    # Use scalar part to compute angle (handles negative scalar correctly)
+    w = mul[..., 3]
+    w_abs = torch.abs(w)
+    w_clamped = torch.clamp(w_abs, 0.0, 1.0)  # Avoid numerical issues
+    angle = 2 * torch.acos(w_clamped)
+    
+    return angle
 
 @torch.jit.script
 def quat_to_6d(q: torch.Tensor) -> torch.Tensor:
