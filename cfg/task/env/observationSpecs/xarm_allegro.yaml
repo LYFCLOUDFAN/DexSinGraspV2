@@ -198,6 +198,10 @@ imagined_pointcloud:
   shape: [num_imagined_points, 3]
   attr: imagined_pointclouds
 
+hand_object_pc_dist:
+  shape: num_keypoints
+  attr: hand_object_pc_distances
+
 ##################################################
 # Contact / Tactile
 ##################################################
