@@ -40,7 +40,7 @@ from .isaacgym_utils import (
     to_torch,
 )
 from .torch_utils import *
-
+from .curiosity import NeuralHashCuriosity
 # for debug
 test_ik = False
 test_sim = False
@@ -781,9 +781,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.allegro_hand_net_contact_forces = net_contact_forces[
             :, self.allegro_hand_rigid_body_start : self.allegro_hand_rigid_body_end, :
         ]
-        # self.surr_object_net_contact_forces = net_contact_forces[
-        #     :, self.surr_object_indices, :
-        # ]
 
         # allocate buffers to hold intermediate results
 
@@ -845,6 +842,15 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.near_goal_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.reset_goal_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         
+        
+
+        # self.enable_curiosity = self.cfg["env"].get("enableCuriosity", False)
+        self.curiosity_repr = self.cfg["env"].get("curiosityRepresentation", "nearest_surface")
+        curiosity_cfg = self.cfg["env"]["curiosity"]
+        self.curiosity_handler = NeuralHashCuriosity(
+            curiosity_cfg, self.device, self.num_envs
+        )
+        self.curiosity_reward_scale = curiosity_cfg["reward_scale"]
         
         
         self.obj_max_length = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -1210,7 +1216,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         net_contact_forces = self.net_contact_forces.view(self.num_envs, self.num_rigid_bodies, 3)
         self.arm_contact_forces = net_contact_forces[:, self.arm_link_indices, :]
         self.hand_contact_forces = net_contact_forces[:, self.hand_link_indices, :]
-        
+        self.fingertip_contact_forces = net_contact_forces[:, self.fingertip_indices, :]
 
         # Target object contact forces [num_envs, 3]
         self.target_object_contact_forces = self.net_contact_forces[self.target_object_rigid_body_indices, :].view(self.num_envs, 3)
@@ -1726,7 +1732,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         self._observation_space_extra = [self._get_observation_spec(name) for name in observation_space_extra]
         self._required_attributes = [spec.attr for spec in self._observation_space_extra]
-
         if self.env_info_logging:
             print_observation_space(self._observation_space)
             print_action_space(self._action_space)
@@ -2427,8 +2432,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         self.num_categories = self.grasping_dataset._category_matrix.shape[1]
 
-
-
     def __reset_grasping_joint_indices(self) -> None:
         # if "target" in self.gym_assets and "robot" in self.gym_assets["target"]:
         #     asset = self.gym_assets["target"]["robot"]["asset"]
@@ -2840,6 +2843,126 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
                     observations[spec.name] = self.observed_object_orientations_wrt_palm.clone()
         return observations
 
+    def _get_target_surface_points_world(self) -> torch.Tensor:
+        # (num_envs, P, 3)
+        canonical = self.grasping_dataset._pointclouds[self.occupied_object_relative_indices]  # (N,P,3)
+        pc_world = quat_rotate(self.object_root_orientations[:, None, :], canonical) + self.object_root_positions[:, None, :]
+        return pc_world
+    
+    def compute_curiosity_observations_surface_all_fingertips(self) -> torch.Tensor:
+        # Features per fingertip: [u_hat(3), r_log_norm(1)] → total 4 fingertips × 4 = 16
+        pcl_world = self._get_target_surface_points_world()   # (N, P, 3)
+        tips = self.fingertip_positions                        # (N, 4, 3)
+
+        # pairwise distances (batched): (N, 4, P)
+        dists = torch.cdist(tips, pcl_world)
+        min_dists_per_finger, idx_p = torch.min(dists, dim=2)  # (N,4), (N,4)
+
+        # gather nearest surface point for each fingertip
+        idx_p_exp = idx_p.unsqueeze(-1).expand(-1, -1, 3)      # (N,4,3)
+        obj_pts = torch.gather(pcl_world, 1, idx_p_exp)        # (N,4,3)
+        u = obj_pts - tips                                     # (N,4,3)
+
+        r = torch.norm(u, dim=2, keepdim=True).clamp_min(1e-6) # (N,4,1)
+        u_hat = u / r                                          # (N,4,3)
+
+        r0 = self.cfg["env"].get("curiosity", {}).get("r0", 0.02)
+        r_max = self.cfg["env"].get("curiosity", {}).get("r_max", 0.20)
+        r_log = torch.log1p(r / r0)                            # (N,4,1)
+        r_log_norm = (r_log / math.log1p(r_max / r0)).clamp(0.0, 1.0)
+
+        feat = torch.cat([u_hat, r_log_norm], dim=-1)          # (N,4,4)
+        return feat.reshape(self.num_envs, 16)                 # (N,16)
+    
+    def compute_curiosity_observations_nearest_surface(self) -> torch.Tensor:
+        # u = nearest object-surface point to nearest fingertip; features: [u_hat(3), r_log(1)]
+        pcl_world = self._get_target_surface_points_world()         # (N, P, 3)
+        tips = self.fingertip_positions                              # (N, 4, 3)
+
+        # pairwise distances (batched): (N, 4, P)
+        dists = torch.cdist(tips, pcl_world)
+        min_dists_per_finger, idx_p = torch.min(dists, dim=2)        # (N,4), (N,4)
+        min_dists, idx_f = torch.min(min_dists_per_finger, dim=1)    # (N,), (N,)
+
+        # check
+        batch = torch.arange(self.num_envs, device=self.device)
+        idx_p_chosen = idx_p[batch, idx_f]                         # (N,)
+        tip_pos_chosen = tips[batch, idx_f, :]                       # (N,3)
+        obj_pt_chosen = pcl_world[batch, idx_p_chosen, :]            # (N,3)
+        u = obj_pt_chosen - tip_pos_chosen                           # (N,3)
+
+        r = torch.norm(u, dim=1, keepdim=True).clamp_min(1e-6)       # (N,1)
+        u_hat = u / r                                                # (N,3)
+
+        r0 = self.cfg["env"].get("curiosity", {}).get("r0", 0.02)    # near scale (m)
+        r_max = self.cfg["env"].get("curiosity", {}).get("r_max", 0.20)
+        r_log = torch.log1p(r / r0)                                  # (N,1)
+        r_log_norm = (r_log / math.log1p(r_max / r0)).clamp(0.0, 1.0)
+
+        return torch.cat([u_hat, r_log_norm], dim=-1), idx_f, min_dists               # (N,4), (N,), (N,)
+
+    def compute_curiosity_observations(self):
+        """Compute the curiosity observations."""
+        # TODO: more structured curiosity observations
+    
+        hand_dof = self.allegro_hand_dof_positions
+        fingertip_rel_pos = (self.fingertip_positions - self.object_root_positions.unsqueeze(1)).reshape(self.num_envs, -1) # (12)
+        keypoints_rel_pos = (self.keypoint_positions - self.object_root_positions.unsqueeze(1)).reshape(self.num_envs, -1) # (48)
+        object_rel_pos = self.object_positions_wrt_palm # (3)
+        contact_info = (torch.norm(self.hand_contact_forces, dim=-1) > 0.2).float() # (19)
+        object_pos_displacement = self.object_root_positions - self.occupied_object_init_root_positions
+        object_ori_displacement = self.object_root_orientations # HACK: hard code (originally no rotation)
+        z_displacement = object_pos_displacement[:, [2]] # (num_envs, 1)
+        x_displacement = object_pos_displacement[:, [0]] # (num_envs, 1)
+        
+        log_pol_vec, idx_f, min_dist = self.compute_curiosity_observations_nearest_surface()
+        # log_pol_vec = self.compute_curiosity_observations_surface_all_fingertips()
+        
+        tips_contact = self.fingertip_contact_forces.norm(dim=-1, p=2) > 0.2
+        N = tips_contact.shape[0]
+        batch = torch.arange(N, device=self.device)
+        # Per-env nearest fingertip contact (bool) → [N]
+        nearest_tip_contact = tips_contact[batch, idx_f]
+        # If min_dist is [N, 1], squeeze it
+        nearest_contact = (nearest_tip_contact & (min_dist.squeeze(-1) < 0.02))
+         
+        curiosity_obs = torch.cat([
+            log_pol_vec[:, :3] * nearest_contact.reshape(-1, 1).float(), # 3
+            # keypoints_rel_pos,  # 48
+            x_displacement.repeat(1, 1), # 1
+            z_displacement.repeat(1, 1),    # 1
+            object_ori_displacement, # 4
+            # contact_info,        # 19
+        ], dim=-1)              # Total: 64
+        
+        return curiosity_obs, nearest_contact
+
+    def compute_curiosity_reward(self):
+        """Compute the curiosity reward."""
+        
+    
+        curiosity_obs, nearest_contact = self.compute_curiosity_observations()  
+        exploration_mask = ~self.picked & nearest_contact
+        exploration_bonus = torch.zeros(self.num_envs, device=self.device)
+        if exploration_mask.any():
+            masked_obs = curiosity_obs[exploration_mask]
+            masked_bonus = self.curiosity_handler.update_curiosity(
+                masked_obs, self.curiosity_reward_scale
+            )
+            exploration_bonus[exploration_mask] = masked_bonus * 1000
+            
+        self.extras["curiosity_reward"] = exploration_bonus.clone()
+        self.extras["exploration_rate"] = exploration_mask.float().clone()
+        
+        return exploration_bonus
+    
+    def compute_fingertip_closure_reward(self):
+        """Compute the reward based on the distance between the fingertip and the object surface."""
+        fingertip_closure_dist = self.compute_curiosity_observations_surface_all_fingertips()
+        fingertip_closure_dist = fingertip_closure_dist.mean(dim=-1)
+        fingertip_closure_dist = fingertip_closure_dist.mean(dim=-1)
+        
+    
     def compute_fingertip_to_obj_center_reward(self):
         """Compute the reward based on the distance between the fingertip and the object center.
 
@@ -3087,140 +3210,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
                 return contact_rew
             self.contact_rew_scaled = contact_rew * self.contact_reward_scale * self.part_reward_scale
 
-    def compute_mutual_reward(self):
-        if self.env_mode == "relpose":
-            rot_rew = self.compute_ori_reward(mutual=True)
-            pos_rew = self.compute_pos_reward(mutual=True)
-            rot_idx = self.rot_eps / torch.max(self.rot_dist, torch.tensor(self.rot_eps, device=self.device))
-            pos_idx = (self.rot_eps / trans_scale) / torch.max(
-                self.pos_dist, torch.tensor(self.rot_eps / trans_scale, device=self.device)
-            )
-
-            self.rot_rew_scaled = rot_rew * pos_idx * self.part_reward_scale
-            self.pos_rew_scaled = pos_rew * rot_idx * self.part_reward_scale
-        elif self.env_mode == "relposecontact" or self.env_mode == "pgm":
-            rot_rew = self.compute_ori_reward(mutual=True)
-            pos_rew = self.compute_pos_reward(mutual=True)
-            contact_rew = self.compute_contact_reward(mutual=True)
-
-            if negative_part_reward:
-                rot_dist_scale = (self.rot_dist + self.rot_eps) / self.rot_eps
-                pos_dist_scale = self.pos_dist + self.rot_eps / trans_scale
-                if "fjcontact" in self.reward_type:
-                    contact_dist_scale = (self.contact_dist + self.contact_eps) / self.contact_eps
-                elif "pclcontact" in self.reward_type:
-                    contact_dist_scale = (self.contact_dist + self.contact_eps) / self.contact_eps
-                rot_idx = torch.max(torch.max(pos_dist_scale, rot_dist_scale), contact_dist_scale)
-                pos_idx = torch.max(torch.max(pos_dist_scale, rot_dist_scale), contact_dist_scale)
-                contact_idx = torch.max(torch.max(pos_dist_scale, rot_dist_scale), contact_dist_scale)
-            else:
-                rot_dist_scale = self.rot_eps / (self.rot_dist + self.rot_eps)
-                pos_dist_scale = (self.rot_eps / trans_scale) / (self.pos_dist + self.rot_eps / trans_scale)
-                if "fjcontact" in self.reward_type:
-                    contact_dist_scale = self.contact_eps / (self.contact_dist + self.contact_eps)
-                elif "pclcontact" in self.reward_type:
-                    contact_dist_scale = self.contact_eps / (self.contact_dist + self.contact_eps)
-                rot_idx = torch.min(torch.min(pos_dist_scale, rot_dist_scale), contact_dist_scale)
-                pos_idx = torch.min(torch.min(pos_dist_scale, rot_dist_scale), contact_dist_scale)
-                contact_idx = torch.min(torch.min(pos_dist_scale, rot_dist_scale), contact_dist_scale)
-
-            # if "curr" in self.reward_type:
-            #     thres = 1.2
-            #     close_env_id = torch.where(
-            #         (torch.abs(self.rot_dist) <= success_tolerance * thres)
-            #         & (torch.abs(self.pos_dist) <= (success_tolerance / trans_scale) * thres),
-            #         torch.ones_like(self.reset_buf),
-            #         torch.zeros_like(self.reset_buf),
-            #     )
-            #     contact_rew *= close_env_id
-
-            self.rot_rew_scaled = rot_rew * rot_idx * self.part_reward_scale
-            self.pos_rew_scaled = pos_rew * pos_idx * self.part_reward_scale * self.tran_reward_scale
-            self.contact_rew_scaled = contact_rew * contact_idx * self.part_reward_scale
-
-    def compute_succ_reward(self):
-        if self.env_mode == "orn" or test_rel:
-            self.succ_rew = torch.where(
-                (torch.abs(self.rot_dist) <= success_tolerance),
-                torch.ones_like(self.reset_buf),
-                torch.zeros_like(self.reset_buf),
-            )
-        elif self.env_mode == "relpose":
-            self.succ_rew = torch.where(
-                (torch.abs(self.rot_dist) <= success_tolerance)
-                & (torch.abs(self.pos_dist) <= (success_tolerance / trans_scale)),
-                torch.ones_like(self.reset_buf),
-                torch.zeros_like(self.reset_buf),
-            )
-        elif self.env_mode == "relposecontact" or self.env_mode == "pgm":
-            if "pclcontactonly" in self.reward_type or "pclcontactmatch" in self.reward_type:
-                self.succ_rew = torch.where(
-                    (torch.abs(self.contact_dist) <= self.contact_eps),
-                    torch.ones_like(self.reset_buf),
-                    torch.zeros_like(self.reset_buf),
-                )
-            elif "pclcontact" in self.reward_type:
-                self.succ_rew = torch.where(
-                    (torch.abs(self.rot_dist) <= success_tolerance)
-                    & (torch.abs(self.pos_dist) <= (success_tolerance / trans_scale))
-                    & (torch.abs(self.contact_dist) <= self.contact_eps),
-                    torch.ones_like(self.reset_buf),
-                    torch.zeros_like(self.reset_buf),
-                )
-            else:
-                if self.env_mode == "pgm":
-                    if self.height_scale == 0:
-                        self.succ_rew = torch.where(
-                            (torch.abs(self.rot_dist) <= success_tolerance)
-                            & (torch.abs(self.pos_dist) <= (success_tolerance / trans_scale))
-                            & (torch.abs(self.fj_dist) <= self.contact_eps),
-                            torch.ones_like(self.reset_buf),
-                            torch.zeros_like(self.reset_buf),
-                        )
-                        if self.mode == "eval" and local_test:
-                            self.pose_succ = torch.where(
-                                (torch.abs(self.rot_dist) <= success_tolerance)
-                                & (torch.abs(self.pos_dist) <= (success_tolerance / trans_scale)),
-                                torch.ones_like(self.reset_buf),
-                                torch.zeros_like(self.reset_buf),
-                            )
-                    else:
-                        if self.enable_full_pointcloud_observation:
-                            # compare lowest point of object pointcloud with table height
-                            lifted = torch.min(self.obj_pointclouds_wrt_world[:, :, 2], dim=1)[0] >= (
-                                self._table_thickness / 2 + self._table_pose[2] + 0.005
-                            )
-                        else:
-                            lifted = (
-                                self.object_root_positions[:, 2]
-                                >= self.occupied_object_init_root_positions[:, 2] + height_success_tolerance
-                            )
-                        self.succ_rew = torch.where(
-                            (torch.abs(self.rot_dist) <= success_tolerance)
-                            & (torch.abs(self.pos_dist) <= (success_tolerance / trans_scale))
-                            & (torch.abs(self.fj_dist) <= self.contact_eps)
-                            & lifted,
-                            torch.ones_like(self.reset_buf),
-                            torch.zeros_like(self.reset_buf),
-                        )
-                else:
-                    self.succ_rew = torch.where(
-                        (torch.abs(self.rot_dist) <= success_tolerance)
-                        & (torch.abs(self.pos_dist) <= (success_tolerance / trans_scale))
-                        & (torch.abs(self.fj_dist) <= self.contact_eps),
-                        torch.ones_like(self.reset_buf),
-                        torch.zeros_like(self.reset_buf),
-                    )
-
-        self.succ_rew_scaled = self.succ_rew * self.reach_goal_bonus
-
-        if self.mode == "eval" and local_test:
-            # pose_succ_envs = (self.pose_succ == 1).nonzero(as_tuple=False).squeeze(-1)
-            # self.set_table_color(pose_succ_envs, color=[0.0,1.0,0.0])
-            succ_envs = (self.succ_rew == 1).nonzero(as_tuple=False).squeeze(-1)
-            self.set_table_color(succ_envs, color=[1.0, 0.0, 0.0])
-            self.render()
-
     def set_table_color(self, env_ids, color=[0, 0, 0]):
         for succ_env_id in env_ids:
             self.gym.set_rigid_body_color(
@@ -3242,7 +3231,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             action_penalty = torch.sum(actions**2, dim=-1)
             self.action_penalty_scaled = action_penalty * 0
 
-    def compute_reach_reward_(self):
+    def compute_reach_reward_deprecated(self):
         """Compute reach reward - reward for reaching the target object."""
         # max(d_closest - d, 0) d is between mean position for fingertips and target object
         self.keypoints_to_obj_dist = torch.mean(
@@ -3286,10 +3275,11 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         # pick = (1 - 1_picked) * h_t + r_picked
 
         self.delta_obj_height = self.object_root_positions[:, 2] - self.occupied_object_init_root_positions[:, 2]
-        self.picked_curr = self.delta_obj_height > 0.12
+        self.picked_curr = self.delta_obj_height > 0.18
         picked = self.picked | self.picked_curr
         newly_picked = ~self.picked & picked
-        newly_picked_bonus = newly_picked * 350
+        # newly_picked_bonus = newly_picked * 350
+        newly_picked_bonus = newly_picked * 700
 
         self.pick_rew = torch.clip((1 - picked.float()) * self.delta_obj_height * 20, min=0) + newly_picked_bonus
         
@@ -3576,9 +3566,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         # Debug
         self.extras["contact_safety_penalty"] = self.contact_safety_penalty.clone()
         self.extras["total_surr_contact_force"] = torch.sum(surr_contact_magnitudes, dim=1).clone()
-        self.extras["target_contact_force"] = torch.norm(self.target_object_contact_forces, dim=1, p=2).clone()
-
-    def compute_safety_penalty(self):
+        self.extras["target_contact_force"] = torcquat_rotate
 
         self.compute_neighbor_pos_penalty()
         self.compute_neighbor_rot_penalty()
@@ -3666,18 +3654,20 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         # self.reset_buf[:] = torch.where(self.progress_buf >= self.max_episode_length - 1, 1, self.reset_buf)
         # self.done_successes[self.reset_buf.nonzero(as_tuple=False).squeeze(-1)] = 0
 
-        # if "tilt" in self.reward_type:
-        #     self.compute_tilt_reward()
+        if "tilt" in self.reward_type:
+            self.compute_tilt_reward()
         if "slide" in self.reward_type:
             self.compute_slide_reward()
-        # if "neighbor" in self.reward_type:
-        #     self.compute_neighbor_stability_penalty()
-        # if "stability" in self.reward_type:
-        #     self.compute_stability_penalty()
 
         self.compute_reach_reward()
+        # self.compute_reach_reward_deprecated()
         self.compute_pick_reward()
         self.compute_targ_reward()
+        
+        
+        self.curiosity_reward = self.compute_curiosity_reward()
+        
+        # print(self.curiosity_reward.mean())
         
         # self.compute_neighbor_pos_penalty()
         # self.compute_neighbor_rot_penalty()
@@ -3700,51 +3690,27 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.rew_buf[:] = (
             self.reach_rew_scaled + self.pick_rew_scaled + self.targ_rew_scaled + bonus_rew
         )
+        # self.rew_buf[:] += self.curiosity_reward
         self.task_reward = self.rew_buf.clone()
         
-        self.compute_safety_penalty()
+        # self.compute_safety_penalty()
         
-        self.rew_buf[:] = self.task_reward - self.safety_penalty
+        self.rew_buf[:] = self.task_reward
+        # self.rew_buf[:] -= self.safety_penalty
         
-        self.extras["task_reward"] = self.task_reward.clone()
-        self.extras["safety_ratio"] = (self.safety_penalty / (torch.abs(self.task_reward) + 1e-6)).clone()
+        # self.extras["task_reward"] = self.task_reward.clone()
+        # self.extras["safety_ratio"] = (self.safety_penalty / (torch.abs(self.task_reward) + 1e-6)).clone()
 
         # Add singulation-specific rewards
-        if "tilt" in self.reward_type:
-            self.rew_buf[:] += self.tilt_reward_scaled
-        if "slide" in self.reward_type:
-            self.rew_buf[:] += self.slide_reward_scaled
-        if "neighbor" in self.reward_type:
-            self.rew_buf[:] += self.neighbor_stability_penalty_scaled
-        if "stability" in self.reward_type:
-            self.rew_buf[:] += self.stability_penalty_scaled
+        # if "tilt" in self.reward_type:
+        #     self.rew_buf[:] += self.tilt_reward_scaled
+        # if "slide" in self.reward_type:
+        #     self.rew_buf[:] += self.slide_reward_scaled
+        # if "neighbor" in self.reward_type:
+        #     self.rew_buf[:] += self.neighbor_stability_penalty_scaled
+        # if "stability" in self.reward_type:
+        #     self.rew_buf[:] += self.stability_penalty_scaled
 
-        # Legacy reward terms (keep for backward compatibility)
-        # if hasattr(self, 'rot_rew_scaled'):
-        #     self.rew_buf[:] += self.rot_rew_scaled
-
-        # if not test_rel and self.env_mode == "relpose":
-        #     self.rew_buf[:] += self.pos_rew_scaled
-        # if self.env_mode == "relposecontact" or self.env_mode == "pgm":
-        #     if "pclcontactonly" in self.reward_type or "pclcontactmatch" in self.reward_type:
-        #         self.rew_buf[:] = (
-        #             self.contact_rew_scaled + self.succ_rew_scaled + self.action_penalty_scaled + self.time_step_penatly
-        #         )
-        #     else:
-        #         self.rew_buf[:] += self.pos_rew_scaled + self.contact_rew_scaled
-
-        #     if self.env_mode == "pgm" and "height" in self.reward_type:
-        #         self.rew_buf[:] += self.height_rew_scaled
-        #     if "nominal" in self.reward_type:
-        #         self.rew_buf[:] += self.nominal_rew_scaled
-        #     if "ft2oc" in self.reward_type:
-        #         self.rew_buf[:] += self.ft2oc_rew_scaled
-        #     if "similarity" in self.reward_type:
-        #         self.rew_buf[:] += self.similarity_reward_scaled * (
-        #             self.progress_buf % self.similarity_reward_freq == 0
-        #         )
-        #     if "manipen" in self.reward_type:
-        #         self.rew_buf[:] += self.manipulability_penalty_scaled
 
         self.compute_done(is_success)
 

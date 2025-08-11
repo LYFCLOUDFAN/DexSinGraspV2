@@ -5,6 +5,7 @@ physics_engine: ${..physics_engine}
 
 defaults:
   - env/observationSpecs: xarm_allegro
+  # - env/curiosityObservationSpecs: xarm_allegro_curiosity
   - env/actionSpecs: xarm_allegro
 
 # if given, will override the device setting in gym.
@@ -83,6 +84,16 @@ env:
   fallPenalty: 0.0
   curriculumMode: "no" # pose mode: set initial pose easy to reach; stage mode: set initial reward for pgm; set to no for evaluation
 
+  enableCuriosity: True
+  curiosity:
+    obs_dim: 18 # 48 * 2 / 134 = 2 * 67
+    hidden_sizes_hash: [16]
+    pred_dim: 16
+    reward_scale: 0.01
+    r0: 0.01
+    r_max: 0.10
+
+
   tiltRewardScale: 1.0  # Reward for tilting object along x-axis (-45 degrees goal)
   slideRewardScale: 1.0  # Reward for sliding object forward along z-axis (20-30cm goal)
   neighborStabilityPenaltyScale: -5.0  # Penalty for moving non-target objects
@@ -118,20 +129,7 @@ env:
 
   observationSpace:
     ${resolve_default:[],${...obs_space}}
-    # - "allegro_hand_dof_position"
-    # - "allegro_hand_dof_velocity"
-    # - "xarm_hand_position"
-    # - "xarm_hand_orientation"
-    # - "fingertip_position"
-    # - "fingertip_orientation"
-    # - "fingertip_linear_velocity"
-    # - "fingertip_angular_velocity"
-    # - "object_position"
-    # - "object_orientation"
-    # - "object_linear_velocity"
-    # - "object_angular_velocity"
-    # - "object_target_orn"
-    # - "orientation_error"
+
 
   observationSpaceExtra:
     # - object_position
