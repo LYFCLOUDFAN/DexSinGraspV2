@@ -349,7 +349,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
     num_objects_per_env: int
 
     _obj_width: float = 0.04
-    _obj_depth: float = 0.04
+    _obj_depth: float = 0.16
     _obj_height: float = 0.24
     _grid_rows: int = 1
     _grid_cols: int = 5
@@ -2222,13 +2222,13 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         }
 
         target_asset_options = gymapi.AssetOptions()
-        target_asset_options.density = 400.0
+        target_asset_options.density = 500.0
         target_asset_options.convex_decomposition_from_submeshes = True
         target_asset_options.override_com = True
         target_asset_options.override_inertia = True
         
         surrounding_asset_options = gymapi.AssetOptions()
-        surrounding_asset_options.density = 400.0
+        surrounding_asset_options.density = 500.0
         surrounding_asset_options.convex_decomposition_from_submeshes = True
         surrounding_asset_options.override_com = True
         surrounding_asset_options.override_inertia = True
@@ -2241,10 +2241,10 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         _targ_rigid_shape_props = self.gym.get_asset_rigid_shape_properties(target_box_asset)
         _surr_rigid_shape_props = self.gym.get_asset_rigid_shape_properties(surrounding_box_asset)
         for shape in _targ_rigid_shape_props:
-            shape.friction = 2.8
+            shape.friction = 0.8
             shape.restitution = 0.1
         for shape in _surr_rigid_shape_props:
-            shape.friction = 2.8
+            shape.friction = 0.8
             shape.restitution = 0.1
         self.gym.set_asset_rigid_shape_properties(target_box_asset, _targ_rigid_shape_props)
         self.gym.set_asset_rigid_shape_properties(surrounding_box_asset, _surr_rigid_shape_props)
@@ -3409,14 +3409,16 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.picked_curr = self.delta_obj_height > 0.12
         picked = self.picked | self.picked_curr
         newly_picked = ~self.picked & picked
-        # newly_picked_bonus = newly_picked * 350
-        newly_picked_bonus = newly_picked * 2000
+        newly_picked_bonus = newly_picked * 350
+        # newly_picked_bonus = newly_picked * 2000
 
-        self.pick_rew = torch.where(
-            self.pre_grasped,
-            torch.clip((1 - picked.float()) * (self.delta_obj_height + 0.05) * 20, min=0) + newly_picked_bonus,
-            torch.zeros_like(self.delta_obj_height) + newly_picked_bonus
-        )
+        # self.pick_rew = torch.where(
+        #     self.pre_grasped,
+        #     torch.clip((1 - picked.float()) * (self.delta_obj_height + 0.05) * 20, min=0) + newly_picked_bonus,
+        #     torch.zeros_like(self.delta_obj_height) + newly_picked_bonus
+        # )
+        
+        self.pick_rew = torch.clip((1 - picked.float()) * (self.delta_obj_height) * 20, min=0) + newly_picked_bonus
         
         self.pick_rew = self.pick_rew * (self.y_displacement > 0.0).float()
         
@@ -3796,7 +3798,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         self.compute_reach_reward()
         # self.compute_reach_reward_deprecated()
-        self.compute_pre_grasp_reward()
+        # self.compute_pre_grasp_reward()
         self.compute_pick_reward()
         self.compute_targ_reward()
         
@@ -3824,7 +3826,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.rew_buf[:] = (
             self.reach_rew_scaled + self.pick_rew_scaled + self.targ_rew_scaled + bonus_rew
         )
-        self.rew_buf[:] += self.pre_grasp_rew_scaled
+        # self.rew_buf[:] += self.pre_grasp_rew_scaled
         # self.rew_buf[:] += self.curiosity_reward
         self.task_reward = self.rew_buf.clone()
         
