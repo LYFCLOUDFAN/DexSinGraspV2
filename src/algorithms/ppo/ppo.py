@@ -705,8 +705,6 @@ class PPO:
                             # done
                             new_done_env_ids = (dones & (1 - eval_done_envs)).nonzero(as_tuple=False).squeeze(-1)
                             if len(new_done_env_ids) > 0:
-                                # if 0 in new_done_env_ids:
-                                #     print("--")
                                 if r > save_time and save_video:
                                     self.vec_env.graphics_device_id = -1
                                     self.vec_env.enable_camera_sensors = False

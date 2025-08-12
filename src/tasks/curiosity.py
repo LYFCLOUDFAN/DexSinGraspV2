@@ -62,17 +62,17 @@ class NeuralHashCuriosity:
             self.obs_ub = torch.tensor(cfg["obs_ub"], device=device).unsqueeze(0)
         elif repr_type == "nearest_surface":
             self.obs_lb = torch.tensor([[
-                # -1.0, -1.0, -1.0, 0.0,
-                -1.0, -1.0, -1.0,
+                -1.0, -1.0, -1.0, 0.0,
+                # -1.0, -1.0, -1.0,
                 0.0,
                 0.0,
                 -0.5, -0.5, -0.5, 0.7
                 ]], device=device)
             self.obs_ub = torch.tensor([[ 
-                # 1.0,  1.0,  1.0, 1.0,
-                1.0, 1.0, 1.0,
-                0.1,
-                0.1,
+                1.0,  1.0,  1.0, 1.0,
+                # 1.0, 1.0, 1.0,
+                0.2,
+                0.2,
                 0.5, 0.5, 0.5, 1.0
                 ]], device=device)
         elif repr_type == "surface_all_fingertips":
