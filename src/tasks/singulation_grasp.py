@@ -2901,7 +2901,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         r_log_norm = (r_log / math.log1p(r_max / r0)).clamp(0.0, 1.0)
 
         feat = torch.cat([u_hat, r_log_norm], dim=-1)          # (N,4,4)
-        return feat.reshape(self.num_envs, 16)                 # (N,16)
+        return feat.reshape(self.num_envs, 16), r                 # (N,16)
     
     def compute_curiosity_observations_nearest_surface(self) -> torch.Tensor:
         # u = nearest object-surface point to nearest fingertip; features: [u_hat(3), r_log(1)]
@@ -2929,8 +2929,41 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         r_log_norm = (r_log / math.log1p(r_max / r0)).clamp(0.0, 1.0)
 
         return torch.cat([u_hat, r_log_norm], dim=-1), idx_f, min_dists               # (N,4), (N,), (N,)
+    
+    def compute_contact_filtered_fingertips_relative_pos(self):
+        """
+        Compute fingertip positions relative to the target object's center, filtered by contact:
+        - Keep only fingertips with (a) contact force > 0.2 and (b) distance-to-surface < 0.02 m.
+        - Others are set to (0,0,0).
+        Returns:
+            filtered_rel (Tensor): (N, 4, 3)
+            has_contact (BoolTensor): (N,) any fingertip satisfied both conditions
+        """
+        # Relative fingertip positions to object center: (N,4,3)
+        rel_pos = self.fingertip_positions - self.object_root_positions.unsqueeze(1)
 
-    def compute_curiosity_observations(self):
+        # Distance to nearest surface point per fingertip: (N,4,1)
+        _, r = self.compute_curiosity_observations_surface_all_fingertips()  # r: (N,4,1)
+
+        # Fingertip contact forces magnitude: (N,4)
+        # if hasattr(self, "fingertip_contact_forces"):
+        contact_mag = self.fingertip_contact_forces.norm(dim=-1, p=2)
+        # else:
+        #     # If sensors are disabled, no contacts
+        #     contact_mag = torch.zeros(rel_pos.shape[:2], device=self.device)
+
+        # Contact filters
+        near_surface = (r.squeeze(-1) < 0.015)           # (N,4)
+        has_force = (contact_mag > 0.5)                 # (N,4)
+        contact_mask = near_surface & has_force         # (N,4)
+
+        # Apply mask
+        filtered_rel = rel_pos * contact_mask.unsqueeze(-1)  # (N,4,3)
+
+        has_contact = contact_mask.any(dim=1)  # (N,)
+        return filtered_rel, has_contact
+
+    def compute_curiosity_observations_deprecated(self):
         """Compute the curiosity observations."""
         # TODO: more structured curiosity observations
     
@@ -2945,7 +2978,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         x_displacement = object_pos_displacement[:, [0]] # (num_envs, 1)
         
         log_pol_vec, idx_f, min_dist = self.compute_curiosity_observations_nearest_surface()
-        # log_pol_vec = self.compute_curiosity_observations_surface_all_fingertips()
+        log_pol_vec, dist = self.compute_curiosity_observations_surface_all_fingertips()
         
         tips_contact = self.fingertip_contact_forces.norm(dim=-1, p=2) > 0.2
         N = tips_contact.shape[0]
@@ -2954,18 +2987,31 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         nearest_tip_contact = tips_contact[batch, idx_f]
         # If min_dist is [N, 1], squeeze it
         nearest_contact = (nearest_tip_contact & (min_dist.squeeze(-1) < 0.02))
-         
+        
+        
+        contact_filtered_fingertips_rel_pos = (self.fingertip_positions - self.object_root_positions.unsqueeze(1))
+        
         curiosity_obs = torch.cat([
             # log_pol_vec * nearest_contact.reshape(-1, 1).float(), # 3
-            log_pol_vec, # 4
-            # keypoints_rel_pos,  # 48
-            x_displacement.repeat(1, 1), # 1
-            z_displacement.repeat(1, 1),    # 1
-            object_ori_displacement, # 4
+            # log_pol_vec, # 4
+            keypoints_rel_pos,  # 48
+            # x_displacement.repeat(1, 1), # 1
+            # z_displacement.repeat(1, 1),    # 1
+            # object_ori_displacement, # 4
             # contact_info,        # 19
         ], dim=-1)              # Total: 64
         
         return curiosity_obs, nearest_contact
+    
+    def compute_curiosity_observations(self):
+        """Compute the curiosity observations."""
+        # Contact-filtered fingertip relative positions  (N, 4 * 3)
+        filtered_rel, has_contact = self.compute_contact_filtered_fingertips_relative_pos()
+        self.contact_filtered_fingertips_relative_pos = filtered_rel
+        self.ContactFilterFingertipsRelativePulse = filtered_rel.reshape(self.num_envs, -1)
+
+        curiosity_obs = self.ContactFilterFingertipsRelativePulse  # (N,12)
+        return curiosity_obs, has_contact
 
     def compute_curiosity_reward(self):
         """Compute the curiosity reward."""
@@ -2979,7 +3025,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             masked_bonus = self.curiosity_handler.update_curiosity(
                 masked_obs, self.curiosity_reward_scale
             )
-            exploration_bonus[exploration_mask] = masked_bonus * 200
+            exploration_bonus[exploration_mask] = masked_bonus * 1000
             
         self.extras["curiosity_reward"] = exploration_bonus.clone()
         self.extras["exploration_rate"] = exploration_mask.float().clone()
@@ -3276,7 +3322,37 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             self.keypoints_to_obj_dist_min, self.keypoints_to_obj_dist
         )
         self.extras["keypoints_to_obj_dist_min"] = self.keypoints_to_obj_dist_min.clone()
-
+        
+    def compute_reach_reward_each_fingertip(self):
+        """Compute reach reward - reward for reaching the target object."""
+        # max(d_i_closest - d_i, 0) d_i is between fingertip i and target object
+        _, r = self.compute_curiosity_observations_surface_all_fingertips() # r (N, 4, 1)
+        
+        if not hasattr(self, "fingertips_to_obj_dist_surface_min"):
+            self.fingertips_to_obj_dist_surface_min = torch.tensor([0.2, 0.2, 0.2, 0.5], device=self.device).unsqueeze(0).repeat(self.num_envs, 1).unsqueeze(-1)
+        
+        current_distances = r
+        fingertip_reach_rewards = torch.clamp(
+            self.fingertips_to_obj_dist_surface_min - current_distances, 
+            min=0
+        ).squeeze(-1)  # (N, 4)
+        
+        fingertip_reach_rewards = fingertip_reach_rewards * (~self.picked).float().unsqueeze(1)
+        fingertip_weights = torch.tensor([1.0, 1.0, 1.0, 3.0], device=self.device)  # index, middle, ring, thumb
+        weighted_rewards = fingertip_reach_rewards * fingertip_weights.unsqueeze(0)  # (N, 4)
+        
+        self.reach_rew_each_fingertip = weighted_rewards.sum(dim=1)  # (N,)
+        self.reach_rew_each_fingertip_scaled = self.reach_rew_each_fingertip * 40
+        
+        self.fingertips_to_obj_dist_surface_min = torch.min(
+            self.fingertips_to_obj_dist_surface_min, current_distances
+        )
+        
+        self.extras["reach_rew_each_fingertip"] = self.reach_rew_each_fingertip_scaled.clone()
+        self.extras["fingertips_to_obj_dist_surface_min"] = self.fingertips_to_obj_dist_surface_min.squeeze(-1).clone()
+        self.extras["fingertip_distances"] = current_distances.squeeze(-1).clone()
+        
+        
     def compute_reach_reward(self):
         """Compute reach reward - reward for reaching the target object."""
         # max(d_closest - d, 0) d is between mean position for fingertips and target object
@@ -3409,11 +3485,11 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.picked_curr = self.delta_obj_height > 0.12
         picked = self.picked | self.picked_curr
         newly_picked = ~self.picked & picked
-        newly_picked_bonus = newly_picked * 350
-        # newly_picked_bonus = newly_picked * 2000
+        # newly_picked_bonus = newly_picked * 350
+        newly_picked_bonus = newly_picked * 1200
 
         # self.pick_rew = torch.where(
-        #     self.pre_grasped,
+        #     self.reached,
         #     torch.clip((1 - picked.float()) * (self.delta_obj_height + 0.05) * 20, min=0) + newly_picked_bonus,
         #     torch.zeros_like(self.delta_obj_height) + newly_picked_bonus
         # )
@@ -3777,6 +3853,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         succ_env_ids = is_success.nonzero(as_tuple=False).squeeze(-1)
         self.reset_buf[succ_env_ids] = 1
         self.successes[succ_env_ids] = 1
+        self.successes[failed_env_ids] = 0
 
         self.done_successes[failed_env_ids] = 0
         self.done_successes[succ_env_ids] = 1
@@ -3796,14 +3873,15 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         if "slide" in self.reward_type:
             self.compute_slide_reward()
 
-        self.compute_reach_reward()
+        # self.compute_reach_reward()
         # self.compute_reach_reward_deprecated()
+        self.compute_reach_reward_each_fingertip(); self.reach_rew_scaled = self.reach_rew_each_fingertip_scaled
         # self.compute_pre_grasp_reward()
         self.compute_pick_reward()
         self.compute_targ_reward()
         
         
-        # self.curiosity_reward = self.compute_curiosity_reward()
+        self.curiosity_reward = self.compute_curiosity_reward()
         
         # print(self.curiosity_reward.mean())
         
@@ -3827,7 +3905,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             self.reach_rew_scaled + self.pick_rew_scaled + self.targ_rew_scaled + bonus_rew
         )
         # self.rew_buf[:] += self.pre_grasp_rew_scaled
-        # self.rew_buf[:] += self.curiosity_reward
+        self.rew_buf[:] += self.curiosity_reward
         self.task_reward = self.rew_buf.clone()
         
         # self.compute_safety_penalty()
@@ -4050,8 +4128,12 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             self.goal_position_dist_min[env_ids] = 0.5
         if hasattr(self, "thumb_to_marker_dist_min"):
             self.thumb_to_marker_dist_min[env_ids] = 0.15
-        if hasattr(self, "other_to_marker_dist_min"):
-            self.other_to_marker_dist_min[env_ids] = 0.15
+        if hasattr(self, "index_to_marker_dist_min"):
+            self.index_to_marker_dist_min[env_ids] = 0.15
+        if hasattr(self, "ring_to_marker_dist_min"):
+            self.ring_to_marker_dist_min[env_ids] = 0.15
+        if hasattr(self, "fingertips_to_obj_dist_surface_min"):
+            self.fingertips_to_obj_dist_surface_min[env_ids] = torch.tensor([0.2, 0.2, 0.2, 0.5], device=self.device).unsqueeze(0).unsqueeze(-1)
         # Set occupied object root positions & orientations
         self.root_positions[self.object_indices.view(self.num_envs, -1)[env_ids], :] = self.init_scene_object_root_positions[env_ids, :]
         self.root_orientations[self.object_indices.view(self.num_envs, -1)[env_ids], :] = self.init_scene_object_root_orientations[env_ids, :]
