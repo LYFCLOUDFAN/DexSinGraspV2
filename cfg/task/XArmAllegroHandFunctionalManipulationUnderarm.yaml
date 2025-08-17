@@ -76,7 +76,7 @@ env:
   armActionPenaltyScale: -0.01
   similarityRewardScale: 1.0
   similarityRewardFreq: 1.0
-  reachGoalBonus: 1600
+  reachGoalBonus: 2400
   heightScale: 0.0
   timeStepPenatly: -0.0
   manipulabilityPenaltyScale: 1.0

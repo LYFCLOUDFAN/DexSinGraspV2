@@ -369,14 +369,14 @@ class PPO:
             self.cur_demo_num = 0
 
     def restore_test(self, path):
-        checkpoint = torch.load(path)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=True)
         self.actor_critic.load_state_dict(checkpoint["model"])
         self.set_test()
 
     def restore_train(self, path):
         if not path:
             return
-        checkpoint = torch.load(path)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=True)
         self.actor_critic.load_state_dict(checkpoint["model"])
         if self.args.con:
             self.current_learning_iteration = int(path.split("_")[-1].split(".")[0])
