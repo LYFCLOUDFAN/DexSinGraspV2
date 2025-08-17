@@ -14,6 +14,7 @@ import pandas as pd
 import pytorch3d
 import torch
 import trimesh
+import json
 from dotenv import find_dotenv
 from isaacgym import gymapi, gymtorch
 from isaacgymenvs.tasks.base.vec_task import VecTask
@@ -25,6 +26,7 @@ from .dataset import OakInkDataset, point_to_mesh_distance
 from .isaacgym_utils import (
     ActionSpec,
     ObservationSpec,
+    draw_points,
     draw_axes,
     draw_boxes,
     get_action_indices,
@@ -196,12 +198,14 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
     _allegro_hand_palm_prim: str = "palm"
     # fmt: off
     _keypoints: List[str] = [
-        # "palm",
+        "base_link",
         "link_12.0", "link_13.0", "link_14.0", "link_15.0_tip",  # thumb
         "link_0.0", "link_1.0", "link_2.0", "link_3.0_tip",     # finger 0 (index)
         "link_4.0", "link_5.0", "link_6.0", "link_7.0_tip",     # finger 1 (middle)
         "link_8.0", "link_9.0", "link_10.0", "link_11.0_tip",   # finger 2 (ring)
     ]
+    _keypoints_info_path: str = "assets/urdf/xarm6_allegro_right_keypoints.json" # XXX: one keypointper link for now.
+    _keypoints_info: Dict[str, List[List[float]]] = json.load(open(_keypoints_info_path, "r"))
     # fmt: on
 
     _xarm_right_init_dof_positions: Dict[str, float] = {
@@ -760,6 +764,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         self.nearest_non_target_object_positions = torch.zeros((self.num_envs, self.num_nearest_non_targets, 3), device=self.device)
         self.nearest_non_target_object_orientations = torch.zeros((self.num_envs, self.num_nearest_non_targets, 4), device=self.device)
+        
+        self.keypoint_offset = torch.tensor(self.keypoint_offset, device=self.device).reshape(1, -1, 3)
 
 
         # Intermediate tensors for _refresh_sim_tensors
@@ -1261,6 +1267,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         
 
         self.keypoint_positions = self.allegro_hand_rigid_body_positions[:, self.keypoint_indices, :]
+        self.keypoint_orientations = self.allegro_hand_rigid_body_orientations[:, self.keypoint_indices, :]
+        self.keypoint_positions_with_offset = self.keypoint_positions + quat_apply(self.keypoint_orientations, self.keypoint_offset.repeat(self.num_envs, 1, 1))
 
 
         self.object_root_states = self.root_states[self.occupied_object_indices]
@@ -2091,6 +2099,9 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.ring_finger_link_indices = [self.gym.find_asset_rigid_body_index(asset, prim) for prim in self._ring_finger_links]
         self.thumb_link_indices = [self.gym.find_asset_rigid_body_index(asset, prim) for prim in self._thumb_links]
         
+        self.hand_link_indices_map = {link_name: self.gym.find_asset_rigid_body_index(asset, link_name) for link_name in self._keypoints}
+        self.keypoint_offset = [self._keypoints_info[link_name] for link_name in self._keypoints] # (#key_link, 1, 3)
+
         config["asset"] = asset
         config["pose"] = pose
         config["dof_props"] = dof_props
@@ -4549,6 +4560,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
             if self.enable_contact_sensors:
                 self.draw_force_sensor_axes()
+                
+            self.draw_link_keypoints()
 
     def reset_obj_vel(self, env_ids):
         # important reset object velocity and angular velocity to zero
@@ -4657,6 +4670,18 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             draw_axes(
                 self.gym, self.viewer, self.envs, self.camera_positions[:, i], self.camera_orientations[:, i], 0.1
             )
+            
+    def draw_link_keypoints(self) -> None:
+        # for link_name, link_index in self.hand_link_indices_map.items():
+        #     link_positions = self.allegro_hand_rigid_body_positions[:, link_index]
+        #     link_orientations = self.allegro_hand_rigid_body_orientations[:, link_index]
+        #     link_keypoints_offset:torch.Tensor = to_torch(self.keypoints_info[link_name], device=self.device).repeat(self.num_envs, 1)
+        #     link_keypoints_positions = link_positions + quat_apply(link_orientations, link_keypoints_offset)
+        #     draw_axes(self.gym, self.viewer, self.envs, link_keypoints_positions, link_orientations, 0.02)
+        for idx, link_name in enumerate(self._keypoints):
+            link_positions = self.keypoint_positions_with_offset[:, idx, :]
+            link_orientations = self.keypoint_orientations[:, idx, :]
+            draw_axes(self.gym, self.viewer, self.envs, link_positions, link_orientations, 0.02)
 
     def print_force_sensor_info(self, env_id: int = 0) -> None:
         force_sensor_states = self.force_sensor_states.view(self.num_envs, self.num_force_sensors, 6)

@@ -231,6 +231,28 @@ def draw_axes(
         gym.add_lines(viewer, envs[i], num_lines, np.concatenate([positions[i], y[i]], axis=-1), g[i])
         gym.add_lines(viewer, envs[i], num_lines, np.concatenate([positions[i], z[i]], axis=-1), b[i])
 
+def draw_points(
+    gym: gymapi.Gym,
+    viewer: gymapi.Viewer,
+    envs: Sequence[gymapi.Env],
+    positions: Tensor,
+    color: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+):
+    assert (positions.ndim == 2 or positions.ndim == 3) and positions.shape[-1] == 3
+    assert positions.shape[0] == len(envs)
+    
+    num_envs = positions.shape[0]
+    num_points = positions.shape[1] if positions.ndim == 3 else 1
+    
+    positions = positions.reshape(num_envs, num_points, 3)
+
+    from isaacgym import gymutil
+    positions_ = positions.reshape(num_envs, -1)
+    for i in range(num_envs):
+        # Fix: Pass color directly as a tuple, not wrapped in tuple()
+        sphere_geom_marker = gymutil.WireframeSphereGeometry(0.01, 5, 5, None, color=color)
+        sphere_pose = gymapi.Transform(gymapi.Vec3(positions_[i, 0], positions_[i, 1], positions_[i, 2]), r=None)
+        gymutil.draw_lines(sphere_geom_marker, gym, viewer, envs[i], sphere_pose)
 
 def draw_boxes(
     gym: gymapi.Gym,
