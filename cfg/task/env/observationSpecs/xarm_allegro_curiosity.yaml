@@ -1,0 +1,65 @@
+__dim__:
+  num_fingers: 4  # Allegro hand has 4 fingertips
+  num_degrees_of_freedom: 22  # xArm6 (6) + Allegro hand (16) = 22 DOF
+  num_fingertips: 4
+  num_keypoints: 17
+
+##################################################
+# Object Geometry Agnostic
+##################################################
+
+# type 1
+keypoints_position_wrt_object:
+  shape: [num_keypoints, 3]
+  attr: keypoints_positions_wrt_object
+  bounds: [-0.5, 0.5]
+
+keypoints_orientation_wrt_object:
+  shape: [num_keypoints, 6]
+  attr: keypoints_orientations_wrt_object
+  bounds: [-1.0, 1.0]
+  tags: ["orientation"]
+
+# type 2
+fingertip_position_wrt_object:
+  shape: [num_fingertips, 3]
+  attr: fingertip_positions_wrt_object
+  bounds: [-1.0, 1.0]
+
+fingertip_position_normalized_wrt_object:
+  shape: [num_fingertips, 3]
+  attr: fingertip_positions_normalized_wrt_object
+  bounds: [-1.0, 1.0]
+
+fingertip_orientation_wrt_object:
+  shape: [num_fingertips, 6]
+  attr: fingertip_orientations_wrt_object
+  bounds: [-1.0, 1.0]
+  tags: ["orientation"]
+
+
+##################################################
+# Object Geometry Dependent
+##################################################
+
+keypoints_position_wrt_obj_pc:
+  shape: [num_keypoints, 3]
+  attr: keypoints_positions_wrt_obj_pc
+  bounds: [-1.0, 1.0]
+
+
+obj_pc_position_wrt_object:
+  shape: [num_obj_pc_points, 3]
+  attr: obj_pc_positions_wrt_object
+  bounds: [-1.0, 1.0]
+
+
+obj_pc_position_normalized_wrt_object:
+  shape: [num_obj_pc_points, 3]
+  attr: obj_pc_positions_normalized_wrt_object
+  bounds: [-1.0, 1.0]
+
+
+
+
+

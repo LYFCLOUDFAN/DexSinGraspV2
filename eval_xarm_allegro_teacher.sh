@@ -9,7 +9,7 @@ python src/train.py \
     num_objects=5 \
     num_objects_per_env=5 \
     graphics_device_id=0 \
-    split='test' \
+    split='train' \
     cluster=$CLUSTER \
     task=XArmAllegroHandFunctionalManipulationUnderarm \
     train=XArmAllegroHandFunctionalManipulationUnderarmPPO \
@@ -21,11 +21,10 @@ python src/train.py \
     reward_type=succrew+tilt+slide+neighbor+actionpen+contact_curiosity \
     physics_engine=physx \
     task.env.pclObs=True \
-    --vis_env_num=2 \
     --seed=42 \
     --exp_name='PPO' \
     --test \
-    --eval_times=5 \
+    --eval_times=2 \
     --logdir="" \
     --run_device_id=-1 \
     --web_visualizer_port=-1 \

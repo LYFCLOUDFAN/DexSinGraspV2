@@ -175,7 +175,7 @@ if __name__ == "__main__":
                     # Contact information
                     "tactile",
                     # Action
-                    "action",
+                    # "action",
                 ]
                 action_space = ["wrist_translation", "wrist_rotation", "hand_rotation"]
             elif "task=FloatingFingertipManipulation" in args.overrides:
