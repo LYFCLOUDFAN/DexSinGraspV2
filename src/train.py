@@ -283,6 +283,7 @@ if __name__ == "__main__":
         else:
             chkpt_path = checkpoints_path[-1]
         print(f"Loading checkpoint from {chkpt_path} at iteration {args.resume_iter if args.resume_iter is not None else iterations[-1]}")
+        # breakpoint()
 
     runner = PPO(
         vec_env=env,
