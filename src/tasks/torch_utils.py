@@ -5,6 +5,95 @@ import torch
 import torch.nn.functional as F
 
 
+@torch.no_grad()
+def farthest_point_sample(xyz: torch.Tensor, npoint: int):
+    """
+    Farthest Point Sampling (FPS)
+    Args:
+        xyz: (B, N, 3) 输入点云
+        npoint: 目标点数
+    Returns:
+        centroids: (B, npoint) 采样到的点索引
+    """
+    device = xyz.device
+    B, N, _ = xyz.shape
+    centroids = torch.zeros(B, npoint, dtype=torch.long, device=device)
+    distance = torch.ones(B, N, device=device) * 1e10
+    # 随机初始化第一个采样点
+    farthest = torch.randint(0, N, (B,), dtype=torch.long, device=device)
+    batch_indices = torch.arange(B, dtype=torch.long, device=device)
+
+    for i in range(npoint):
+        centroids[:, i] = farthest
+        centroid = xyz[batch_indices, farthest, :].view(B, 1, 3)
+        dist = torch.sum((xyz - centroid) ** 2, -1)
+        mask = dist < distance
+        distance[mask] = dist[mask]
+        farthest = torch.max(distance, -1)[1]
+    return centroids
+
+
+
+@torch.no_grad()
+def build_group_lut(pc: torch.Tensor, fps_idx: torch.Tensor, *, use_cdist: bool = True):
+    """
+    一次性分组并构建查表 LUT
+    Args:
+        pc:      (N, M, 3) float  —— 原始点云
+        fps_idx: (N, K)    long   —— FPS 选出的中心索引（相对 pc）
+        use_cdist: 是否使用 torch.cdist（更简洁），False 时用广播算平方距离（省显存）
+
+    Returns:
+        assign_idx: (N, M) long     —— 每个原始点归属的最近中心 (0..K-1)
+        LUT:        (N, M+1) long   —— 索引查表：0->0, j+1 -> assign_idx[j]+1
+                                      用于把 contact state 从 1..M 映射到 1..K
+    """
+    assert pc.ndim == 3 and fps_idx.ndim == 2
+    N, M, _ = pc.shape
+    K = fps_idx.shape[1]
+    device = pc.device
+
+    # 中心坐标 (N, K, 3)
+    centroids = torch.gather(pc, dim=1, index=fps_idx.unsqueeze(-1).expand(-1, -1, 3))
+
+    # 分配最近中心
+    if use_cdist:
+        dists = torch.cdist(pc, centroids, p=2)         # (N, M, K)
+    else:
+        # 广播算平方距离，省显存：||x-y||^2 = ||x||^2 + ||y||^2 - 2 x·y
+        x2 = (pc ** 2).sum(dim=2, keepdim=True)         # (N, M, 1)
+        y2 = (centroids ** 2).sum(dim=2).unsqueeze(1)   # (N, 1, K)
+        xy = pc @ centroids.transpose(1, 2)             # (N, M, K)
+        dists = x2 + y2 - 2.0 * xy                      # (N, M, K)  # 非负但可能有微小负值
+    assign_idx = dists.argmin(dim=2)                    # (N, M) in [0..K-1]
+
+    # 构建 LUT： 0 -> 0,  j+1 -> assign_idx[j] + 1
+    LUT = torch.zeros((N, M + 1), dtype=torch.long, device=device)
+    LUT[:, 1:] = assign_idx + 1
+
+    return assign_idx, LUT
+
+
+@torch.no_grad()
+def remap_contact_state(s_c: torch.Tensor, LUT: torch.Tensor):
+    """
+    多次调用，把 contact state 从 0..M 转成 0..K（0 保持 0）
+    Args:
+        s_c: (N, L) long     —— 0..M（0=无接触，1..M=原点索引+1）
+        LUT: (N, M+1) long   —— 来自 build_group_lut
+
+    Returns:
+        s_c_grouped: (N, L) long —— 0..K（0=无接触，1..K=簇索引+1）
+    """
+    assert s_c.ndim == 2 and LUT.ndim == 2 and s_c.size(0) == LUT.size(0)
+    N, L = s_c.shape
+    M = LUT.size(1) - 1
+    # 直接查表：按行 gather
+    s_c_clamped = s_c.clamp_min(0).clamp_max(M)
+    s_c_grouped = LUT.gather(dim=1, index=s_c_clamped)
+    return s_c_grouped
+
+
 @torch.jit.script
 def reciprocal(x: torch.Tensor, eps: float = 0.0, scale: float = 1.0, negate: bool = False) -> torch.Tensor:
     """Computes the reciprocal of a tensor element-wise."""
