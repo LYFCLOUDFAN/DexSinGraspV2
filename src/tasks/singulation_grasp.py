@@ -2308,22 +2308,25 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         # Calculate grid dimensions
         grid_width = self._grid_cols * self._obj_width + (self._grid_cols - 1) * self._obj_spacing
-        grid_height = self._grid_rows * self._obj_depth + (self._grid_rows - 1) * self._obj_spacing
+        grid_depth = self._grid_rows * self._obj_depth + (self._grid_rows - 1) * self._obj_spacing
+        grid_height = self._grid_layers * self._obj_height + (self._grid_layers - 1) * self._obj_spacing
 
         # Starting position (top-left corner of grid)
         start_x = table_center_x - grid_width / 2 + self._obj_width / 2
-        start_y = table_center_y - grid_height / 2 + self._obj_depth / 2
-
+        start_y = table_center_y - grid_depth / 2 + self._obj_depth / 2
+        start_z = table_top_z
+        
         # Generate poses for each box in the grid
         for i in range(self.num_objects_per_env):
-            row = i // self._grid_cols
             col = i % self._grid_cols
+            row = (i // self._grid_cols) % self._grid_rows
+            layer = i // (self._grid_cols * self._grid_rows)
 
             pose = gymapi.Transform()
             pose.p = gymapi.Vec3(
                 start_x + col * (self._obj_width + self._obj_spacing),
                 start_y + row * (self._obj_depth + self._obj_spacing),
-                table_top_z
+                start_z + layer * (self._obj_height + self._obj_spacing)
             )
             pose.r = gymapi.Quat(0, 0, 0, 1)  # No rotation
 
@@ -2650,7 +2653,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         surr_object_indices = []
         non_occupied_object_indices = [[] for _ in range(num_envs)]
         scene_object_indices = [[] for _ in range(num_envs)]
-        occupied_object_indices_per_env = [random.randint(2, 2) for _ in range(num_envs)]
+        occupied_object_indices_per_env = [random.randint(0, self.num_objects_per_env - 1) for _ in range(num_envs)]
 
         print(">>> Creating environments")
         print("    - max_aggregate_bodies: ", max_aggregate_bodies)
@@ -2966,12 +2969,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         # Distance to nearest surface point per fingertip: (N,4,1)
         _, r = self.compute_curiosity_observations_surface_all_fingertips()  # r: (N,4,1)
 
-        # Fingertip contact forces magnitude: (N,4)
-        # if hasattr(self, "fingertip_contact_forces"):
+
         contact_mag = self.fingertip_contact_forces.norm(dim=-1, p=2)
-        # else:
-        #     # If sensors are disabled, no contacts
-        #     contact_mag = torch.zeros(rel_pos.shape[:2], device=self.device)
 
         # Contact filters
         near_surface = (r.squeeze(-1) < 0.015)           # (N,4)
@@ -3347,6 +3346,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
     def compute_reach_reward_(self):
         """Compute reach reward - reward for reaching the target object."""
         # max(d_closest - d, 0) d is between mean position for fingertips and target object
+        # index finger link to object top surface
+        # 0.25 * 20 = 5
         surface_offset = torch.tensor([0.0, 0.0, 0.13], device=self.device)
         object_root_positions_with_offset = compute_offset_point_world(
             self.object_root_positions,
@@ -3715,13 +3716,14 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
     def compute_pick_reward(self):
         """Compute pick reward - reward for picking the target object."""
         # pick = (1 - 1_picked) * h_t + r_picked
+        # shaping 0.15 * 200 = 30 | extra 100
 
         self.obj_height_displacement = self.object_root_positions[:, 2] - self.occupied_object_init_root_positions[:, 2]
         self.picked_curr = self.obj_height_displacement > 0.15
         picked = self.picked | self.picked_curr
         newly_picked = ~self.picked & picked
         # newly_picked_bonus = newly_picked * 350
-        newly_picked_bonus = newly_picked * 150
+        newly_picked_bonus = newly_picked * 100
         
         if not hasattr(self, "obj_height_displacement_min"):
             self.obj_height_displacement_min = torch.ones_like(self.obj_height_displacement) * 0.15
@@ -3771,6 +3773,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
     def compute_targ_reward(self):
         """Compute target reward - reward for reaching the target state."""
         # 1_picked * max(d_closest - d_target, 0) + r_succ d is between mean position for target object's target pos and target object
+        # 0.5 * 600 = 300
         if not hasattr(self, "goal_position"):
             # self.goal_position = torch.tensor([0.0, 0.5, 0.75], device=self.device, dtype=torch.float)
             self.goal_position = torch.tensor([0.0, 0.5, 0.6], device=self.device, dtype=torch.float)
@@ -3789,7 +3792,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         #     self.picked.float() * clipped_delta * 250,
         # ) * (self.y_displacement > 0.0).float() * (self.picked).float()
         
-        self.targ_rew = clipped_delta * 1600 * (self.picked).float() * (self.y_displacement > 0.0).float()
+        self.targ_rew = clipped_delta * 600 * (self.picked).float() * (self.y_displacement > 0.0).float()
         
         
         self.targ_rew_scaled = self.targ_rew * (1)
@@ -4141,7 +4144,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         bonus_rew = self.near_goal * (self.reach_goal_bonus / self.success_steps)
 
         self.rew_buf[:] = (
-            self.reach_rew_scaled + self.pick_rew_scaled + self.targ_rew_scaled + bonus_rew + is_success * 30000
+            self.reach_rew_scaled + self.pick_rew_scaled + self.targ_rew_scaled + bonus_rew + is_success * 4000
         )
         # self.rew_buf[:] += self.pre_grasp_rew_scaled
         # self.rew_buf[:] += self.curiosity_reward
