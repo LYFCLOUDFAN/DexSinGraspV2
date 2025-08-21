@@ -1,8 +1,9 @@
-from typing import Tuple
+from typing import Tuple, Optional
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+from pytorch3d.transforms import matrix_to_quaternion
 
 
 @torch.jit.script
@@ -447,3 +448,37 @@ def transformation_apply(quat: torch.Tensor, pos: torch.Tensor, vec: torch.Tenso
     quaternion_shape = pos.shape[:-1] + (4,)
     quat = torch.broadcast_to(quat, quaternion_shape)
     return quat_apply(quat, vec) + pos
+
+
+def quat_from_two_vectors(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Quaternion rotating vector a to vector b. a,b: (..., 3)/(3,). Return (..., 4)/(4,).
+    """
+    single = (a.dim() == 1)
+    if single:
+        a = a.unsqueeze(0)
+        b = b.unsqueeze(0)
+    a_n = a / (torch.norm(a, dim=-1, keepdim=True).clamp_min(1e-9))
+    b_n = b / (torch.norm(b, dim=-1, keepdim=True).clamp_min(1e-9))
+    v = torch.cross(a_n, b_n, dim=-1)
+    c = (a_n * b_n).sum(dim=-1, keepdim=True)
+    w = 1.0 + c
+
+    opp = (w.squeeze(-1) < 1e-6)
+    if opp.any(): # case: opposite vectors, pick 180deg about an arbitrary orthogonal axis
+        axis = torch.zeros_like(a_n)
+        # choose axis orthogonal to a_n
+        idx = (torch.abs(a_n[:, 0]) < 0.9).float().unsqueeze(-1)
+        ref = torch.where(idx > 0, torch.tensor([1.0, 0.0, 0.0], device=a.device).expand_as(a_n),
+                            torch.tensor([0.0, 1.0, 0.0], device=a.device).expand_as(a_n))
+        axis_opp = torch.cross(a_n, ref, dim=-1)
+        axis_opp = axis_opp / (torch.norm(axis_opp, dim=-1, keepdim=True).clamp_min(1e-9))
+        # 180deg rotation quaternion
+        q_opp = torch.cat([axis_opp, torch.zeros(axis_opp.size(0), 1, device=a.device)], dim=-1)
+        q = torch.cat([v, w], dim=-1)
+        q[opp] = q_opp[opp]
+    else:
+        q = torch.cat([v, w], dim=-1)
+    q = q / (torch.norm(q, dim=-1, keepdim=True).clamp_min(1e-9))
+    if single:
+        q = q.squeeze(0)
+    return q
