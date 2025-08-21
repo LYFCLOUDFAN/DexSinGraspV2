@@ -362,6 +362,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
     _grid_layers: int = 1
     _obj_spacing: float = 0.005
     VISUAL_TARGET_COLLISION_FILTER = 0x7FFFFFFF
+    obj_mask_type: str = None  # "front_bottom", "front_middle", "front_top", "all"
+    obj_mask: Tensor = None
     
 
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render):
@@ -904,10 +906,71 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         pcd = self.pointclouds.clone()
         centroids = farthest_point_sample(pcd, npoint=20)
         _, self.lut = build_group_lut(pcd, centroids, use_cdist=False)
+        
+        self.obj_mask_type = self.cfg["env"].get("objMaskType", None)
+        self.obj_mask = self.build_obj_mask(self.pointclouds)
 
         # init state has collide with table, so we need to first reset to get robot to a valid pose, then continue simulation
         self.actions = torch.zeros((self.num_envs, self.num_actions), device=self.device)
         self.reset_arm(first_time=True)
+        
+    def build_obj_mask(self, obj_pc):
+        """
+        obj_pc: (N, M, 3)  物体点云（世界系 or 物体系都行，只要 y 是“前-后”、z 是“下-上”）
+        切分规则：
+        深度(y):  [center_y - D/2, center_y - D/6] -> back
+                    (center_y - D/6, center_y + D/6] -> middle
+                    (center_y + D/6, center_y + D/2] -> front
+        高度(z):  [center_z - D/2, center_z - H/6] -> bottom
+                    (center_z - H/6, center_z + H/6] -> middle
+                    (center_z + H/6, center_z + H/2] -> top
+        支持的类型: front_bottom, front_middle, front_top, top_front, top_middle, top_back
+        返回: (N, M) bool
+        """
+        y = obj_pc[..., 1]  # depth axis
+        z = obj_pc[..., 2]  # height axis
+
+        D = self._obj_depth   # e.g., 0.16
+        H = self._obj_height  # e.g., 0.24
+
+        # 深度分界（围绕中心等分）
+        center_y = y.mean(dim=1, keepdim=True)                    # (N,1)
+        y_back_hi   = center_y - D/6.0
+        y_front_hi = center_y + D/6.0
+
+        back_mask   = (y <= y_back_hi)
+        middle_mask = (y >  y_back_hi)  & (y <= y_front_hi)
+        front_mask  = (y >  y_front_hi)
+
+        # 高度分界（从底部往上等分）
+        center_z = z.mean(dim=1, keepdim=True)                    # (N,1)
+        z_down_hi   = center_z - H/6.0
+        z_up_hi = center_z + H/6.0
+
+        bottom_mask = (z <= z_down_hi)
+        midz_mask   = (z >  z_down_hi)  & (z <= z_up_hi)
+        top_mask    = (z >  z_up_hi)
+
+        t = getattr(self, "obj_mask_type", None)
+        if t is None or t == "all":
+            mask = torch.ones_like(y, dtype=torch.bool)
+        elif t == "front_bottom":
+            mask = front_mask & bottom_mask
+        elif t == "front_middle":
+            mask = front_mask & midz_mask
+        elif t == "front_top":
+            mask = front_mask & top_mask
+        elif t == "top_front":
+            mask = top_mask & front_mask
+        elif t == "top_middle":
+            mask = top_mask & middle_mask
+        elif t == "top_back":
+            mask = top_mask & back_mask
+        else:
+            raise ValueError(f"Unknown obj_mask_type: {t} (expected one of "
+                            f"front_bottom/front_middle/front_top/top_front/top_middle/top_back)")
+
+        return mask
 
     def reset_arm(self, first_time=False):
         self.reset(first_time=first_time)
@@ -1242,6 +1305,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.ring_link_contact_forces = net_contact_forces[:, self.ring_finger_link_indices, :]
         self.thumb_link_contact_forces = net_contact_forces[:, self.thumb_link_indices, :]
         self.fingertip_contact_forces = net_contact_forces[:, self.fingertip_indices, :]
+        self.keypoint_contact_forces = net_contact_forces[:, self.keypoint_indices, :]
 
         # Target object contact forces [num_envs, 3]
         self.target_object_contact_forces = self.net_contact_forces[self.target_object_rigid_body_indices, :].view(self.num_envs, 3)
@@ -3498,20 +3562,99 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         
         obj_pc = self.compute_object_pointclouds("current") # (N, M, 3)
         # self.visualize_pointcloud(obj_pc, color=(1,0,0))  # 可视化物体点云
-        # hand_pc = self.keypoint_positions # (N, L, 3)
-        hand_pc = self.keypoint_positions_with_offset # (N, L, 3)
+        hand_pc = self.keypoint_positions # (N, L, 3)
+        # hand_pc = self.keypoint_positions_with_offset # (N, L, 3)
         pointwise_dist = torch.cdist(hand_pc, obj_pc, p=2)  # (N, L, M)
+        
+        if self.obj_mask is not None:
+            obj_mask_wrt_hand = self.obj_mask.unsqueeze(1).repeat(1, hand_pc.shape[1], 1)  # (N, L, M)
+            # 物体点云掩码，过滤掉不需要的点
+            pointwise_dist = pointwise_dist.masked_fill(~obj_mask_wrt_hand, float('inf'))
+        
         d_ho, n = pointwise_dist.min(dim=2)  # (N, L), (N, L)
         n = n + 1 # index starts from 1
         
         s_c = None
         if tau is not None:
-            mask = d_ho <= tau
+            dist_mask = d_ho <= tau
+            keypoint_force = self.keypoint_contact_forces
+            force_mask = keypoint_force.norm(dim=-1, p=2) > 0.5  # (N, L)
+            # print("force_mask:", force_mask)
+            mask = dist_mask & force_mask  # (N, L) 只保留有接触的关键点
             # assert ~mask.any(), "contact happens"
             s_c = torch.where(mask, n, torch.zeros_like(n, dtype=torch.long))  # (N, L)
             
         return d_ho, n, s_c # (N, L), (N, L), (N, L) or None
             
+    def compute_reach_reward(
+        self,
+        tau: float,
+        temp: float = 0.01,           # softmin 的温度，越小越接近 min
+        w_progress: float = 1.0,      # 进度（靠近）奖励权重
+        w_dense: float = 0.0,         # 稠密距离 shaping 权重（可设 >0）
+        contact_bonus: float = 0.0,   # 进入阈值内的奖励
+        per_contact: bool = True,    # True=按接触数量计 bonus；False=任意接触给一次
+        normalize: str = "tau",       # "tau" | "none"
+    ):
+        """
+        奖励 = w_progress * (prev_softmin - curr_softmin)   # 更靠近 => 正奖励
+            + w_dense   * (- curr_softmin)               # 距离越小越好（可选）
+            + contact_bonus * contact_count_or_any       # 接触 bonus（可选）
+
+        返回:
+            reward: (N,)
+            info: dict，包含诊断量
+        """
+        # 1) 距离矩阵（不需要在这里用 tau 过滤）
+        d_ho, _, _ = self.compute_hand_object_distance(tau=None)  # (N, L)
+        # print("d_ho:", d_ho)
+
+        # 2) softmin 作为“多关键点距离”的平滑近似最小值
+        #    softmin(d) = -t * logsumexp(-d/t, dim=1)
+        eps = 1e-8
+        t = max(temp, 1e-6)
+        smin_curr = -t * torch.logsumexp(-d_ho / t, dim=1)        # (N,)
+
+        # 3) 归一化（可选）
+        if normalize == "tau":
+            smin_curr = smin_curr / max(tau, eps)
+
+        # 4) 进度奖励：比上一步更接近 => 正的 (prev - curr)
+        if not hasattr(self, "_reach_prev_smin"):
+            # 第一次调用或形状变化，初始化为当前，避免首步产生虚假奖励
+            self._reach_prev_smin = smin_curr.detach().clone()
+        r_progress = (self._reach_prev_smin - smin_curr)          # (N,)
+
+        # 5) 稠密 shaping（可选）：距离越小越好
+        r_dense = -smin_curr
+
+        # 6) 接触 bonus（可选）
+        contact_mask = (d_ho <= tau)                              # (N, L)
+        if per_contact:
+            contact_term = contact_mask.sum(dim=1).to(d_ho.dtype) # 计数
+        else:
+            contact_term = contact_mask.any(dim=1).to(d_ho.dtype) # 是否
+
+        # 7) 聚合奖励
+        reward = w_progress * r_progress + w_dense * r_dense + contact_bonus * contact_term
+        self.reach_rew_scaled = reward * 1.0
+        # print("reach_reward_scaled:", self.reach_rew_scaled)
+        self.extras["reach_rew"] = self.reach_rew_scaled.clone()
+
+        # 8) 更新缓存（放最后，确保 r_progress 用的是上一步）
+        self._reach_prev_smin = smin_curr.detach().clone()
+
+        info = {
+            "softmin_dist": smin_curr,                 # (N,)
+            "progress": r_progress,                    # (N,)
+            "dense_term": r_dense,                     # (N,)
+            "had_contact": (contact_term > 0).float(), # (N,)
+            "contact_count": contact_mask.sum(dim=1),  # (N,)
+            "min_dist": d_ho.min(dim=1).values,        # (N,) 真实最小距离（非平滑）
+            "mean_dist": d_ho.mean(dim=1),             # (N,)
+        }
+        return reward, info
+    
     # def compute_reach_reward(
     #     self,
     #     tau: float,
@@ -3535,24 +3678,21 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
     #     d_ho, _, _ = self.compute_hand_object_distance(tau=None)  # (N, L)
     #     # print("d_ho:", d_ho)
 
-    #     # 2) softmin 作为“多关键点距离”的平滑近似最小值
-    #     #    softmin(d) = -t * logsumexp(-d/t, dim=1)
+    #     # 2) 平均距离
     #     eps = 1e-8
-    #     t = max(temp, 1e-6)
-    #     smin_curr = -t * torch.logsumexp(-d_ho / t, dim=1)        # (N,)
+    #     mean_curr = d_ho.mean(dim=1)  # (N,)
 
     #     # 3) 归一化（可选）
     #     if normalize == "tau":
-    #         smin_curr = smin_curr / max(tau, eps)
+    #         mean_curr = mean_curr / max(tau, eps)
 
-    #     # 4) 进度奖励：比上一步更接近 => 正的 (prev - curr)
-    #     if not hasattr(self, "_reach_prev_smin"):
-    #         # 第一次调用或形状变化，初始化为当前，避免首步产生虚假奖励
-    #         self._reach_prev_smin = smin_curr.detach().clone()
-    #     r_progress = (self._reach_prev_smin - smin_curr)          # (N,)
+    #     # 4) 进度奖励
+    #     if not hasattr(self, "_reach_prev_mean"):
+    #         self._reach_prev_mean = mean_curr.detach().clone()
+    #     r_progress = (self._reach_prev_mean - mean_curr)  # 更小 → 正奖励
 
     #     # 5) 稠密 shaping（可选）：距离越小越好
-    #     r_dense = -smin_curr
+    #     r_dense = -mean_curr
 
     #     # 6) 接触 bonus（可选）
     #     contact_mask = (d_ho <= tau)                              # (N, L)
@@ -3563,15 +3703,15 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
     #     # 7) 聚合奖励
     #     reward = w_progress * r_progress + w_dense * r_dense + contact_bonus * contact_term
-    #     self.reach_rew_scaled = reward * 1.0
+    #     self.reach_rew_scaled = reward * 10.0
     #     # print("reach_reward_scaled:", self.reach_rew_scaled)
     #     self.extras["reach_rew"] = self.reach_rew_scaled.clone()
 
     #     # 8) 更新缓存（放最后，确保 r_progress 用的是上一步）
-    #     self._reach_prev_smin = smin_curr.detach().clone()
+    #     self._reach_prev_mean = mean_curr.detach().clone()
 
     #     info = {
-    #         "softmin_dist": smin_curr,                 # (N,)
+    #         "softmin_dist": mean_curr,                 # (N,)
     #         "progress": r_progress,                    # (N,)
     #         "dense_term": r_dense,                     # (N,)
     #         "had_contact": (contact_term > 0).float(), # (N,)
@@ -3580,72 +3720,6 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
     #         "mean_dist": d_ho.mean(dim=1),             # (N,)
     #     }
     #     return reward, info
-    
-    def compute_reach_reward(
-        self,
-        tau: float,
-        temp: float = 0.01,           # softmin 的温度，越小越接近 min
-        w_progress: float = 1.0,      # 进度（靠近）奖励权重
-        w_dense: float = 0.0,         # 稠密距离 shaping 权重（可设 >0）
-        contact_bonus: float = 0.0,   # 进入阈值内的奖励
-        per_contact: bool = True,    # True=按接触数量计 bonus；False=任意接触给一次
-        normalize: str = "tau",       # "tau" | "none"
-    ):
-        """
-        奖励 = w_progress * (prev_softmin - curr_softmin)   # 更靠近 => 正奖励
-            + w_dense   * (- curr_softmin)               # 距离越小越好（可选）
-            + contact_bonus * contact_count_or_any       # 接触 bonus（可选）
-
-        返回:
-            reward: (N,)
-            info: dict，包含诊断量
-        """
-        # 1) 距离矩阵（不需要在这里用 tau 过滤）
-        d_ho, _, _ = self.compute_hand_object_distance(tau=None)  # (N, L)
-        print("d_ho:", d_ho)
-
-        # 2) 平均距离
-        eps = 1e-8
-        mean_curr = d_ho.mean(dim=1)  # (N,)
-
-        # 3) 归一化（可选）
-        if normalize == "tau":
-            mean_curr = mean_curr / max(tau, eps)
-
-        # 4) 进度奖励
-        if not hasattr(self, "_reach_prev_mean"):
-            self._reach_prev_mean = mean_curr.detach().clone()
-        r_progress = (self._reach_prev_mean - mean_curr)  # 更小 → 正奖励
-
-        # 5) 稠密 shaping（可选）：距离越小越好
-        r_dense = -mean_curr
-
-        # 6) 接触 bonus（可选）
-        contact_mask = (d_ho <= tau)                              # (N, L)
-        if per_contact:
-            contact_term = contact_mask.sum(dim=1).to(d_ho.dtype) # 计数
-        else:
-            contact_term = contact_mask.any(dim=1).to(d_ho.dtype) # 是否
-
-        # 7) 聚合奖励
-        reward = w_progress * r_progress + w_dense * r_dense + contact_bonus * contact_term
-        self.reach_rew_scaled = reward * 1.0
-        # print("reach_reward_scaled:", self.reach_rew_scaled)
-        self.extras["reach_rew"] = self.reach_rew_scaled.clone()
-
-        # 8) 更新缓存（放最后，确保 r_progress 用的是上一步）
-        self._reach_prev_mean = mean_curr.detach().clone()
-
-        info = {
-            "softmin_dist": mean_curr,                 # (N,)
-            "progress": r_progress,                    # (N,)
-            "dense_term": r_dense,                     # (N,)
-            "had_contact": (contact_term > 0).float(), # (N,)
-            "contact_count": contact_mask.sum(dim=1),  # (N,)
-            "min_dist": d_ho.min(dim=1).values,        # (N,) 真实最小距离（非平滑）
-            "mean_dist": d_ho.mean(dim=1),             # (N,)
-        }
-        return reward, info
     
     def compute_contact_curiosity_reward(self, tau: float, mode: str = "new_only"):
         """
@@ -3667,13 +3741,19 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             - has_contact: (N,) 是否存在任意接触
         """
         d_ho, n, s_c = self.compute_hand_object_distance(tau=tau)
-        s_c = remap_contact_state(s_c, self.lut)
+        # s_c = remap_contact_state(s_c, self.lut)
         mask = (d_ho <= tau)
+        dist_mask = (d_ho <= tau)
+        # print("dist_mask:", dist_mask)
+        keypoint_force = self.keypoint_contact_forces
+        force_mask = keypoint_force.norm(dim=-1, p=2) > 0.5  # (N, L)
+        # print("force_mask:", force_mask)
+        mask = dist_mask & force_mask  # (N, L) 只保留有接触的关键点
         
         s_c_cpu = s_c.to(torch.int32).contiguous().cpu().numpy()
         codes = [s_c_cpu[e].tobytes() for e in range(self.num_envs)]
         has_contact = mask.any(dim=1)  # (N,) bool
-        print("has_contact:", has_contact)
+        # print("has_contact:", has_contact)
 
         count_prev = torch.zeros(self.num_envs, dtype=torch.int64, device=s_c.device)
         is_new = torch.zeros(self.num_envs, dtype=torch.bool, device=s_c.device)
@@ -3728,7 +3808,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         if not hasattr(self, "obj_height_displacement_min"):
             self.obj_height_displacement_min = torch.ones_like(self.obj_height_displacement) * 0.15
         
-        self.delta_obj_height = torch.clip(self.obj_height_displacement_min - (0.15 - self.obj_height_displacement), min=0)
+        self.delta_obj_height = torch.clip(self.obj_height_displacement_min - torch.clip(0.15 - self.obj_height_displacement, min=0), min=0)
 
         # self.pick_rew = torch.where(
         #     self.reached,
@@ -4154,7 +4234,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         
         # self.rew_buf[:] = self.task_reward - self.safety_penalty
         
-        # self.extras["task_reward"] = self.task_reward.clone()
+        self.extras["task_reward"] = self.task_reward.clone()
         # self.extras["safety_ratio"] = (self.safety_penalty / (torch.abs(self.task_reward) + 1e-6)).clone()
 
         # Add singulation-specific rewards
@@ -4162,10 +4242,10 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             self.rew_buf[:] += self.tilt_reward_scaled
         if "slide" in self.reward_type:
             self.rew_buf[:] += self.slide_reward_scaled
-        if "neighbor" in self.reward_type:
-            self.rew_buf[:] += self.neighbor_stability_penalty_scaled
-        if "stability" in self.reward_type:
-            self.rew_buf[:] += self.stability_penalty_scaled
+        # if "neighbor" in self.reward_type:
+        #     self.rew_buf[:] += self.neighbor_stability_penalty_scaled
+        # if "stability" in self.reward_type:
+        #     self.rew_buf[:] += self.stability_penalty_scaled
         if "curiosity" in self.reward_type:
             self.rew_buf[:] += self.contact_curiosity_rew_scaled
             # breakpoint()
@@ -4936,7 +5016,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         #     link_keypoints_positions = link_positions + quat_apply(link_orientations, link_keypoints_offset)
         #     draw_axes(self.gym, self.viewer, self.envs, link_keypoints_positions, link_orientations, 0.02)
         for idx, link_name in enumerate(self._keypoints):
-            link_positions = self.keypoint_positions_with_offset[:, idx, :]
+            # link_positions = self.keypoint_positions_with_offset[:, idx, :]
+            link_positions = self.keypoint_positions[:, idx, :]
             link_orientations = self.keypoint_orientations[:, idx, :]
             draw_axes(self.gym, self.viewer, self.envs, link_positions, link_orientations, 0.02)
 

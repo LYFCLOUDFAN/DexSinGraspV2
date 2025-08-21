@@ -21,7 +21,8 @@ python src/train.py \
     rl_device=cuda:0 \
     physics_engine=physx \
     task.env.pclObs=True \
-    task.env.numObjectPointCloudPoints=20 \
+    task.env.numObjectPointCloudPoints=500 \
+    +task.env.objMaskType=all \
     --seed=42 \
     --exp_name='PPO' \
     --logdir='xarm_allegro_singulation_ppo' \
