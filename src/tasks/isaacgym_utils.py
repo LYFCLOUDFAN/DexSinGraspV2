@@ -236,6 +236,8 @@ def draw_points(
     viewer: gymapi.Viewer,
     envs: Sequence[gymapi.Env],
     positions: Tensor,
+    radius: float = 0.01,
+    num_segments: int = 20,
     color: Tuple[float, float, float] = (1.0, 1.0, 1.0),
 ):
     assert (positions.ndim == 2 or positions.ndim == 3) and positions.shape[-1] == 3
@@ -249,8 +251,7 @@ def draw_points(
     from isaacgym import gymutil
     positions_ = positions.reshape(num_envs, -1)
     for i in range(num_envs):
-        # Fix: Pass color directly as a tuple, not wrapped in tuple()
-        sphere_geom_marker = gymutil.WireframeSphereGeometry(0.01, 5, 5, None, color=color)
+        sphere_geom_marker = gymutil.WireframeSphereGeometry(radius, num_segments, num_segments, None, color=color)
         sphere_pose = gymapi.Transform(gymapi.Vec3(positions_[i, 0], positions_[i, 1], positions_[i, 2]), r=None)
         gymutil.draw_lines(sphere_geom_marker, gym, viewer, envs[i], sphere_pose)
 
