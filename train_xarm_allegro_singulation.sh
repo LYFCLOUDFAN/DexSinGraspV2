@@ -16,13 +16,10 @@ python src/train.py \
     task=XArmAllegroHandFunctionalManipulationUnderarm \
     train=XArmAllegroHandFunctionalManipulationUnderarmPPO \
     task.env.enableContactSensors=False \
-    reward_type=succrew+tilt+slide+neighbor+actionpen+curiosity \
+    reward_type=succrew+tilt+slide+neighbor+actionpen \
     sim_device=cuda:0 \
     rl_device=cuda:0 \
     physics_engine=physx \
-    task.env.pclObs=True \
-    task.env.numObjectPointCloudPoints=500 \
-    +task.env.objMaskType=all \
     --seed=42 \
     --exp_name='PPO' \
     --logdir='xarm_allegro_singulation_ppo' \
