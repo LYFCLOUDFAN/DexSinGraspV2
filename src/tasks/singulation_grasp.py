@@ -525,7 +525,9 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         self.manipulated_object_codes = None
         self.resample_object = self.cfg["env"]["resampleObject"]
-
+        
+        # Use upper shelf
+        self.use_upper_shelf = self.cfg["env"].get("useUpperShelf", True)
 
         self.aggregate_tracker = AggregateTracker()
 
@@ -888,12 +890,41 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.random_init_radius = float(self.cfg["env"].get("randomInitRadius", 0.25))
         self.random_init_only_training = bool(self.cfg["env"].get("randomInitOnlyTraining", True))
         
-        self.use_precomputed_poses = self.cfg["env"].get("usePrecomputedPoses", True)
+        self.use_precomputed_poses = self.cfg["env"].get("usePrecomputedPoses", False)
         self.precomputed_poses_file = self.cfg["env"].get("precomputedPosesFile", "data/precomputed_arm_poses.pt")
         self.precomputed_pose_bank = None
         if self.use_precomputed_poses:
             self._load_precomputed_poses()
         
+        
+        # Exploration logging
+        self.enable_exploration_logging = self.cfg["env"].get("enableExplorationLogging", False)
+        self.exploration_voxel_size = float(self.cfg["env"].get("explorationVoxelSize", 0.005))  # meters
+        self.exploration_margin = float(self.cfg["env"].get("explorationMargin", 0.02))
+        self.exploration_tag = self.cfg["env"].get(
+            "explorationTag", "reach_curiosity" if self.curiosity_reward_scale > 0 else "reach_only"
+        )
+        if self.enable_exploration_logging:
+            # bounds around the box in object-local coords
+            w, d, h = self._obj_width, self._obj_depth, self._obj_height
+            min_bound = torch.tensor(
+                [-w / 2 - self.exploration_margin, -d / 2 - self.exploration_margin, -h / 2 - self.exploration_margin],
+                device=self.device,
+                dtype=torch.float,
+            )
+            max_bound = torch.tensor(
+                [w / 2 + self.exploration_margin, d / 2 + self.exploration_margin, h / 2 + self.exploration_margin],
+                device=self.device,
+                dtype=torch.float,
+            )
+            size = max_bound - min_bound
+            nx, ny, nz = (size / self.exploration_voxel_size).ceil().to(torch.long).tolist()
+            nx, ny, nz = max(1, nx), max(1, ny), max(1, nz)
+            self._expl_min_bound = min_bound
+            self._expl_dims = (nx, ny, nz)
+            # counts per fingertip: 4 fingertips × voxel grid
+            self.exploration_counts = torch.zeros(4, nx, ny, nz, dtype=torch.int32, device=self.device)
+            
         
         self.obj_max_length = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         if "gf" in self.observation_info:
@@ -1871,6 +1902,40 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             "num_rigid_bodies": num_rigid_bodies,
             "num_rigid_shapes": num_rigid_shapes,
         }
+        
+
+    def __define_upper_shelf(self) -> Dict[str, Any]:
+        asset_options = gymapi.AssetOptions()
+        asset_options.fix_base_link = True
+        asset_options.flip_visual_attachments = False
+        asset_options.collapse_fixed_joints = True
+        asset_options.disable_gravity = True
+        asset_options.thickness = 0.001
+
+        asset = self.gym.create_box(
+            self.sim, self._table_x_length, self._table_y_length, self._table_thickness, asset_options
+        )
+
+
+        rigid_shape_props = self.gym.get_asset_rigid_shape_properties(asset)
+        self.gym.set_asset_rigid_shape_properties(asset, rigid_shape_props)
+
+        num_rigid_bodies = self.gym.get_asset_rigid_body_count(asset)
+        num_rigid_shapes = self.gym.get_asset_rigid_shape_count(asset)
+
+        import copy
+        pose = gymapi.Transform()
+        _upper_shelf_pose = copy.deepcopy(self._table_pose)
+        _upper_shelf_pose[2] += self._obj_height * 1.25 + self._table_thickness * 0.5
+        pose.p = gymapi.Vec3(*_upper_shelf_pose)
+
+        return {
+            "asset": asset,
+            "pose": pose,
+            "name": "upper_shelf",
+            "num_rigid_bodies": num_rigid_bodies,
+            "num_rigid_shapes": num_rigid_shapes,
+        }
 
     def __define_contact_sensors(self, allegro_hand_asset: gymapi.Asset) -> None:
         """Configure the contact sensors.
@@ -2640,6 +2705,10 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         num_bodies += gym_assets["current"]["visual_target_object"]["num_rigid_bodies"]
         num_shapes += gym_assets["current"]["visual_target_object"]["num_rigid_shapes"]
 
+        if self.use_upper_shelf:
+            num_bodies += gym_assets["current"]["upper_shelf"]["num_rigid_bodies"]
+            num_shapes += gym_assets["current"]["upper_shelf"]["num_rigid_shapes"]
+
         # num_bodies += gym_assets["current"]["objects"]["warehouse"][0]["num_rigid_bodies"]
         # num_shapes += gym_assets["current"]["objects"]["warehouse"][0]["num_rigid_shapes"]
 
@@ -2657,6 +2726,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.gym_assets["current"]["objects"] = self.__define_object()
         self.gym_assets["current"]["table"] = self.__define_table()
         self.gym_assets["current"]["visual_target_object"] = self.__define_visual_target_object()
+        if self.use_upper_shelf:
+            self.gym_assets["current"]["upper_shelf"] = self.__define_upper_shelf()
 
         # self.gym_assets["target"]["robot"] = self.__define_target_allegro_hand()
 
@@ -2671,6 +2742,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         allegro_hand_indices = []
         table_indices = []
+        upper_shelf_indices = [] if self.use_upper_shelf else None
         visual_target_object_indices = []
         object_indices = [[] for _ in range(num_envs)]
         object_encodings = [[] for _ in range(num_envs)]
@@ -2736,6 +2808,12 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
                 env, self.gym_assets["current"]["table"], -1, actor_handle=True, color=gymapi.Vec3(0.0, 0.0, 0.0)
             )
             table_indices.append(actor_handle)
+
+            if self.use_upper_shelf:
+                actor_index, actor_handle = self.__create_sim_actor(
+                    env, self.gym_assets["current"]["upper_shelf"], -1, actor_handle=True, color=gymapi.Vec3(0.0, 0.0, 0.0)
+                )
+                upper_shelf_indices.append(actor_handle)
 
             # add visual target object to the environment
             actor_index, actor_handle = self.__create_sim_actor(
@@ -2838,7 +2916,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         self.table_indices = torch.tensor(table_indices).long().to(self.device)
         self.visual_target_object_indices = torch.tensor(visual_target_object_indices).long().to(self.device)
-
+        self.upper_shelf_indices = torch.tensor(upper_shelf_indices).long().to(self.device) if self.use_upper_shelf else None
         self.object_indices = torch.tensor(object_indices).long().to(self.device)
         self.object_names = object_names
         self.object_encodings = torch.tensor(object_encodings).long().to(self.device)
@@ -3555,7 +3633,9 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         # shaping 0.15 * 200 = 30 | extra 100
         self.obj_height_displacement = self.object_root_positions[:, 2] - self.occupied_object_init_root_positions[:, 2]
         self.picked_curr = self.obj_height_displacement > 0.15
-        self.picked_curr = (self.obj_height_displacement > 0.15) & ((self.cur_index_keypoint_to_obj_surface_dist < 0.005).any(dim=-1)) & ((self.cur_thumb_keypoint_to_obj_surface_dist < 0.005).any(dim=-1))
+        # self.picked_curr = (self.obj_height_displacement > 0.15) \
+        #                 & ((self.cur_index_keypoint_to_obj_surface_dist < 0.005).any(dim=-1)) \
+        #                 & ((self.cur_thumb_keypoint_to_obj_surface_dist < 0.005).any(dim=-1))
         picked = self.picked | self.picked_curr
         newly_picked = ~self.picked & picked
         # newly_picked_bonus = newly_picked * 350
@@ -3987,8 +4067,9 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.rew_buf[:] = (
             self.reach_rew_scaled + self.pick_rew_scaled + self.targ_rew_scaled + bonus_rew + is_success * 4000
         )
+        # self.rew_buf[:] = self.reach_rew_scaled
         # self.rew_buf[:] += self.pre_grasp_rew_scaled
-        # self.rew_buf[:] += self.curiosity_reward
+        self.rew_buf[:] += self.curiosity_reward
         self.task_reward = self.rew_buf.clone()
         
         # self.compute_safety_penalty()
@@ -4428,6 +4509,70 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         assert poses.ndim == 2 and poses.shape[1] == self.num_dofs, "Pose dim mismatch"
         self.precomputed_pose_bank = poses
         print(f"[precomputed] Loaded {poses.shape[0]} poses from {self.precomputed_poses_file}")
+        
+    @torch.no_grad()
+    def _log_exploration_contacts_step(self) -> None:
+        """Accumulate per-fingertip voxel counts of contact-filtered points in object-local frame."""
+        if not getattr(self, "enable_exploration_logging", False):
+            return
+        # nearest-surface distance per fingertip (N,4,1) and mask for 'near' contact
+        _, r = self.compute_curiosity_observations_surface_all_fingertips()  # r in (N,4,1)
+        r = r.squeeze(-1)  # (N,4)
+        # force-based contact
+        contact_mag = self.fingertip_contact_forces.norm(dim=-1, p=2)  # (N,4)
+        near_surface = r < 0.005  # meters
+        has_force = contact_mag > 0.5
+        contact_mask = near_surface & has_force  # (N,4)
+
+        if not contact_mask.any():
+            return
+
+        # Fingertip positions in object-local frame (N,4,3)
+        ftip_pos_obj = compute_relative_position(
+            self.fingertip_positions,
+            self.object_root_orientations[:, None, :],
+            self.object_root_positions[:, None, :],
+        )  # (N,4,3)
+
+        # Select contacted points and voxelize
+        min_b = self._expl_min_bound  # (3,)
+        vx = self.exploration_voxel_size
+        nx, ny, nz = self._expl_dims
+
+        # Build per-fingertip indices
+        for f in range(4):
+            mask_f = contact_mask[:, f]  # (N,)
+            if not mask_f.any():
+                continue
+            pts = ftip_pos_obj[mask_f, f, :]  # (M,3)
+            # voxel coords
+            ijk = ((pts - min_b) / vx).floor().to(torch.long)  # (M,3)
+            i, j, k = ijk[:, 0], ijk[:, 1], ijk[:, 2]
+            valid = (i >= 0) & (i < nx) & (j >= 0) & (j < ny) & (k >= 0) & (k < nz)
+            if not valid.any():
+                continue
+            i, j, k = i[valid], j[valid], k[valid]
+            # scatter add
+            self.exploration_counts[f, i, j, k] += 1
+            
+    @torch.no_grad()
+    def save_exploration_density(self, path: str) -> None:
+        """Save voxelized exploration density to disk for offline visualization."""
+        if not getattr(self, "enable_exploration_logging", False):
+            print("[exploration] logging disabled; nothing to save.")
+            return
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        data = {
+            "counts": self.exploration_counts.detach().to("cpu"),
+            "voxel_size": float(self.exploration_voxel_size),
+            "min_bound": self._expl_min_bound.detach().to("cpu"),
+            "dims": self._expl_dims,
+            "tag": self.exploration_tag,  # "reach_only" or "reach_curiosity"
+            "fingertip_order": ["index", "middle", "ring", "thumb"],
+            "object_dims": [self._obj_width, self._obj_depth, self._obj_height],
+        }
+        torch.save(data, path)
+        print(f"[exploration] saved voxel density to: {path}")
 
     @torch.no_grad()
     def sample_precomputed_pose(self, env_ids: torch.LongTensor) -> None:
@@ -4740,6 +4885,9 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             self.extras["gpu_mem_occupied_ratio"] = gpu_mem_occupied / gpu_mem_total
 
         self.extras["max_jacobian_det"] = torch.max(torch.det(self.j_eef).abs()).reshape(1)
+        
+        if self.enable_exploration_logging:
+            self._log_exploration_contacts_step()
 
         if self.viewer and self.debug_viz:
             self.gym.clear_lines(self.viewer)
