@@ -1263,6 +1263,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.ring_link_contact_forces = net_contact_forces[:, self.ring_finger_link_indices, :]
         self.thumb_link_contact_forces = net_contact_forces[:, self.thumb_link_indices, :]
         self.fingertip_contact_forces = net_contact_forces[:, self.fingertip_indices, :]
+        self.keypoint_contact_forces = net_contact_forces[:, self.keypoint_indices, :]
 
         # Target object contact forces [num_envs, 3]
         self.target_object_contact_forces = self.net_contact_forces[self.target_object_rigid_body_indices, :].view(self.num_envs, 3)
@@ -2269,7 +2270,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         }
 
         target_asset_options = gymapi.AssetOptions()
-        target_asset_options.density = 500.0
+        target_asset_options.density = 1000.0
         target_asset_options.convex_decomposition_from_submeshes = True
         target_asset_options.override_com = True
         target_asset_options.override_inertia = True
@@ -2801,6 +2802,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         allegro_hand = self.gym.find_actor_handle(env, "allegro_hand")
         self.allegro_hand_index = self.gym.get_actor_index(env, allegro_hand, gymapi.DOMAIN_ENV)
+        breakpoint()
         
         # Object Rigid Body Index Tracking
         self.target_object_rigid_body_indices = torch.zeros((num_envs,), dtype=torch.long, device=self.device)
@@ -2954,6 +2956,31 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         feat = torch.cat([u_hat, r_log_norm], dim=-1)          # (N,4,4)
         return feat.reshape(self.num_envs, 16), r                 # (N,16)
     
+    def compute_curiosity_observations_surface_all_keypoints(self) -> torch.Tensor:
+        # Features per fingertip: [u_hat(3), r_log_norm(1)] → total 4 fingertips × 4 = 16
+        pcl_world = self._get_target_surface_points_world()   # (N, P, 3)
+        offseted_keypoints = self.keypoint_positions_with_offset
+
+        # pairwise distances (batched): (N, 4, P)
+        dists = torch.cdist(offseted_keypoints, pcl_world)
+        min_dists_per_finger, idx_p = torch.min(dists, dim=2)  # (N,4), (N,4)
+
+        # gather nearest surface point for each fingertip
+        idx_p_exp = idx_p.unsqueeze(-1).expand(-1, -1, 3)      # (N,4,3)
+        obj_pts = torch.gather(pcl_world, 1, idx_p_exp)        # (N,4,3)
+        u = obj_pts - offseted_keypoints                                     # (N,4,3)
+
+        r = torch.norm(u, dim=2, keepdim=True).clamp_min(1e-6) # (N,4,1)
+        u_hat = u / r                                          # (N,4,3)
+
+        r0 = self.cfg["env"].get("curiosity", {}).get("r0", 0.02)
+        r_max = self.cfg["env"].get("curiosity", {}).get("r_max", 0.20)
+        r_log = torch.log1p(r / r0)                            # (N,4,1)
+        r_log_norm = (r_log / math.log1p(r_max / r0)).clamp(0.0, 1.0)
+
+        feat = torch.cat([u_hat, r_log_norm], dim=-1)          # (N,4,4)
+        return feat.reshape(self.num_envs, -1), r                 # (N,16)
+    
     def compute_curiosity_observations_nearest_surface(self) -> torch.Tensor:
         # u = nearest object-surface point to nearest fingertip; features: [u_hat(3), r_log(1)]
         pcl_world = self._get_target_surface_points_world()         # (N, P, 3)
@@ -2997,6 +3024,33 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
 
         contact_mag = self.fingertip_contact_forces.norm(dim=-1, p=2)
+
+        # Contact filters
+        near_surface = (r.squeeze(-1) < 0.005)           # (N,4)
+        has_force = (contact_mag > 0.5)                 # (N,4)
+        contact_mask = near_surface & has_force         # (N,4)
+
+        # Apply mask
+        filtered_rel = rel_pos * contact_mask.unsqueeze(-1)  # (N,4,3)
+
+        has_contact = contact_mask.any(dim=1)  # (N,)
+        return filtered_rel, has_contact
+    
+    def compute_contact_filtered_keypoints_relative_pos(self):
+        """
+        Compute keypoint positions relative to the target object's center, filtered by contact.
+        Returns:
+            filtered_rel (Tensor): (N, 4, 3)
+            has_contact (BoolTensor): (N,) any keypoint satisfied both conditions
+        """
+        # Relative keypoint positions to object center: (N,4,3)
+        rel_pos = self.keypoint_positions_with_offset - self.object_root_positions.unsqueeze(1)
+
+        # Distance to nearest surface point per keypoint: (N,4,1)
+        _, r = self.compute_curiosity_observations_surface_all_keypoints()  # r: (N,4,1)
+
+
+        contact_mag = self.keypoint_contact_forces.norm(dim=-1, p=2)
 
         # Contact filters
         near_surface = (r.squeeze(-1) < 0.005)           # (N,4)
@@ -3052,7 +3106,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
     def compute_curiosity_observations(self):
         """Compute the curiosity observations."""
         # Contact-filtered fingertip relative positions  (N, 4 * 3)
-        filtered_rel, has_contact = self.compute_contact_filtered_fingertips_relative_pos()
+        # filtered_rel, has_contact = self.compute_contact_filtered_fingertips_relative_pos()
+        filtered_rel, has_contact = self.compute_contact_filtered_keypoints_relative_pos()
         self.contact_filtered_fingertips_relative_pos = filtered_rel
         self.ContactFilterFingertipsRelativePulse = filtered_rel.reshape(self.num_envs, -1)
         
