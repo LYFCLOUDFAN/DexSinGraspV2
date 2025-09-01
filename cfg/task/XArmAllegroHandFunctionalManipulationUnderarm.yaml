@@ -86,8 +86,8 @@ env:
 
   enableCuriosity: True
   curiosity:
-    obs_dim: 24 # 48 * 2 / 134 = 2 * 67
-    hidden_sizes_hash: [16]
+    obs_dim: 126 # 48 * 2 / 134 = 2 * 67
+    hidden_sizes_hash: [128]
     pred_dim: 16
     reward_scale: 0.01
     r0: 0.01

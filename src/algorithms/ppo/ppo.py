@@ -369,14 +369,14 @@ class PPO:
             self.cur_demo_num = 0
 
     def restore_test(self, path):
-        checkpoint = torch.load(path, map_location=self.device, weights_only=True)
+        checkpoint = torch.load(path)
         self.actor_critic.load_state_dict(checkpoint["model"])
         self.set_test()
 
     def restore_train(self, path):
         if not path:
             return
-        checkpoint = torch.load(path, map_location=self.device, weights_only=True)
+        checkpoint = torch.load(path)
         self.actor_critic.load_state_dict(checkpoint["model"])
         if self.args.con:
             self.current_learning_iteration = int(path.split("_")[-1].split(".")[0])
@@ -705,6 +705,8 @@ class PPO:
                             # done
                             new_done_env_ids = (dones & (1 - eval_done_envs)).nonzero(as_tuple=False).squeeze(-1)
                             if len(new_done_env_ids) > 0:
+                                # if 0 in new_done_env_ids:
+                                #     print("--")
                                 if r > save_time and save_video:
                                     self.vec_env.graphics_device_id = -1
                                     self.vec_env.enable_camera_sensors = False

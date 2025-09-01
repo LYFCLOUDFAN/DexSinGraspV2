@@ -372,6 +372,155 @@ def point_to_mesh_distance(
 
     return (sdf_values if ndim == 3 else sdf_values.squeeze(1)).to(device)
 
+
+class ObjectDataset(FunctionalGraspingDataset):
+    """Generic dataset for object-centric tasks."""
+    object_meta = {
+        "block": {
+            "object_type": "mesh_file",
+            "file_path": "/home/nus/IsaacGymEnvs/assets/urdf/objects/meshes/cube_multicolor.obj",
+            "scale": [0.05, 0.05, 0.05],   # per-axis scale
+        },
+        "egg": {
+            "object_type": "predefined_geometry",
+            "geometry_type": "ellipsoid",
+            "size": [0.03, 0.03, 0.04],    # axes a,b,c
+        },
+        "pen": {
+            "object_type": "predefined_geometry",
+            "geometry_type": "capsule",
+            "size": [0.008, 0.1],          # [radius, length]  (length为中部圆柱段长度)
+        },
+    }
+
+    def __init__(
+        self,
+        object: str,
+        device: "Optional[Union[str, torch.device]]" = None,
+        pcl_num: int = 1024,
+    ):
+        super().__init__()
+        self.object = object
+        self.device = torch.device(device) if device is not None else torch.device("cpu")
+        self.pcl_num = pcl_num
+        
+        self._pointclouds = self._create_object_pointclouds()
+
+    # === 主函数：按对象类型创建点云 ===
+    def _create_object_pointclouds(self) -> torch.Tensor:
+        meta = self.object_meta[self.object]
+
+        if meta["object_type"] == "mesh_file":
+            import trimesh
+            file_path = meta["file_path"]
+            mesh = trimesh.load(file_path, force='mesh')
+            scale = meta.get("scale", None)
+            # 支持各向异性缩放
+            if scale is not None:
+                if isinstance(scale, (list, tuple, np.ndarray)) and len(scale) == 3:
+                    S = np.eye(4, dtype=np.float64)
+                    S[0, 0], S[1, 1], S[2, 2] = scale
+                    mesh.apply_transform(S)
+                else:
+                    mesh.apply_scale(float(scale))
+
+            # 采样 n 个点（单个对象），再按 num_objects 复制
+            pts, _ = trimesh.sample.sample_surface(mesh, self.pcl_num)
+            pts = torch.as_tensor(pts, dtype=torch.float32, device=self.device)  # (n,3)
+            pts = pts.unsqueeze(0)  # (1,n,3)
+            return pts
+
+        elif meta["object_type"] == "predefined_geometry":
+            gtype = meta["geometry_type"].lower()
+            if gtype == "ellipsoid":
+                a, b, c = meta["size"]  # 轴长
+                pts = self._sample_ellipsoid_surface(self.pcl_num, a, b, c)                 # (n,3)
+            elif gtype == "capsule":
+                r, L = meta["size"]  # 半径r，中部圆柱长度L
+                pts = self._sample_capsule_surface(self.pcl_num, r, L)                      # (n,3)
+            else:
+                raise ValueError(f"Unknown geometry_type: {gtype}")
+
+            pts = torch.as_tensor(pts, dtype=torch.float32, device=self.device)
+            pts = pts.unsqueeze(0)                                           # (1,n,3)
+            return pts
+
+        else:
+            raise ValueError(f"Unknown object_type: {meta['object_type']}")
+
+    # === 椭球表面采样（近似均匀）：从单位球面均匀采样后各向缩放 ===
+    @staticmethod
+    def _sample_ellipsoid_surface(n: int, a: float, b: float, c: float) -> np.ndarray:
+        # 在单位球面均匀采样：z ~ U(-1,1), phi ~ U(0,2π)
+        z = np.random.uniform(-1.0, 1.0, size=(n,))
+        phi = np.random.uniform(0.0, 2.0 * np.pi, size=(n,))
+        r_xy = np.sqrt(1.0 - z**2)
+        x = r_xy * np.cos(phi)
+        y = r_xy * np.sin(phi)
+        # 各向缩放到椭球
+        pts = np.stack([a * x, b * y, c * z], axis=1)  # (n,3)
+        return pts
+
+    # === 胶囊体(z轴对齐)表面采样：按表面积比例分配到圆柱与两端半球 ===
+    @staticmethod
+    def _sample_capsule_surface(n: int, r: float, L: float) -> np.ndarray:
+        # 总面积：圆柱侧面积 2π r L；两半球面积 4π r^2
+        area_cyl = 2.0 * np.pi * r * L
+        area_caps = 4.0 * np.pi * r * r
+        area_total = area_cyl + area_caps
+        n_cyl = max(0, int(round(n * area_cyl / area_total)))
+        n_caps = n - n_cyl
+        # 两个半球各一半
+        n_cap_top = n_caps // 2
+        n_cap_bot = n_caps - n_cap_top
+
+        pts_list = []
+
+        # 圆柱侧面：theta ~ U[0,2π], z ~ U[-L/2, L/2]
+        if n_cyl > 0:
+            theta = np.random.uniform(0.0, 2.0 * np.pi, size=(n_cyl,))
+            z = np.random.uniform(-L / 2.0, L / 2.0, size=(n_cyl,))
+            x = r * np.cos(theta)
+            y = r * np.sin(theta)
+            pts_list.append(np.stack([x, y, z], axis=1))
+
+        # 顶部半球 (z>=0)：在单位球面均匀采样，再筛选 z>=0，缩放到半径 r，并平移到 z=+L/2
+        if n_cap_top > 0:
+            pts_top = ObjectDataset._sample_hemisphere_surface(n_cap_top, r, upper=True)
+            pts_top[:, 2] += L / 2.0
+            pts_list.append(pts_top)
+
+        # 底部半球 (z<=0)：同理，平移到 z=-L/2
+        if n_cap_bot > 0:
+            pts_bot = ObjectDataset._sample_hemisphere_surface(n_cap_bot, r, upper=False)
+            pts_bot[:, 2] -= L / 2.0
+            pts_list.append(pts_bot)
+
+        if len(pts_list) == 0:
+            return np.zeros((n, 3), dtype=np.float32)
+        pts = np.concatenate(pts_list, axis=0)
+        # 若因为四舍五入点数略偏，裁剪/补齐
+        if pts.shape[0] > n:
+            pts = pts[:n]
+        elif pts.shape[0] < n:
+            need = n - pts.shape[0]
+            pts = np.concatenate([pts, pts[:need]], axis=0)
+        return pts.astype(np.float32)
+
+    @staticmethod
+    def _sample_hemisphere_surface(n: int, r: float, upper: bool = True) -> np.ndarray:
+        # 在单位球面均匀采样：z ~ U(-1,1), phi ~ U(0,2π)，然后筛选上/下半球
+        # 为避免拒绝采样开销，直接用 z ~ U(0,1) 或 U(-1,0)
+        if upper:
+            z = np.random.uniform(0.0, 1.0, size=(n,))
+        else:
+            z = np.random.uniform(-1.0, 0.0, size=(n,))
+        phi = np.random.uniform(0.0, 2.0 * np.pi, size=(n,))
+        r_xy = np.sqrt(1.0 - z**2)
+        x = r_xy * np.cos(phi)
+        y = r_xy * np.sin(phi)
+        return (r * np.stack([x, y, z], axis=1)).astype(np.float32)
+
 class BoxGridDataset(FunctionalGraspingDataset):
     """Simple dataset for box grid singulation task."""
     

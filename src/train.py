@@ -194,6 +194,27 @@ if __name__ == "__main__":
                     "object_bbox",
                 ]
                 action_space = ["floating_fingertip_dof"]
+            elif "task=InhandManipulationAllegro" in args.overrides:
+                obs_space = [
+                    # Hand state
+                    "allegro_hand_dof_position",
+                    "allegro_hand_dof_velocity",
+                    # Fingertip information for contact detection
+                    "fingertip_position_wrt_palm",
+                    "fingertip_orientation_wrt_palm",
+                    "fingertip_linear_velocity",
+                    "fingertip_angular_velocity",
+                    # Object state (current target object)
+                    "object_position_wrt_palm",
+                    "object_orientation_wrt_palm",
+                    "object_position",
+                    "object_orientation",
+                    "object_linear_velocity",
+                    "object_angular_velocity",
+                    # Action
+                    "action",
+                ]
+                action_space = ["hand_rotation"]
             else:
                 # Default Shadow Hand configuration
                 obs_space = [

@@ -57,15 +57,22 @@ def parse_urdf_for_hand_links(urdf_path: str, include_palm: bool = False) -> Lis
     tree = ET.parse(urdf_path)
     root = tree.getroot()
 
+    # def is_hand_link(name: str) -> bool:
+    #     if name.startswith("link_base"): # xarm base link
+    #         return False
+    #     if name.startswith("link_"):
+    #         return True
+    #     if include_palm and name in {"palm", "base_link"}:
+    #         return True
+    #     # exclude xArm links: link1..link6
+    #     if name in {"wrist"} and include_palm:
+    #         return True
+    #     return False
+    
     def is_hand_link(name: str) -> bool:
-        if name.startswith("link_base"): # xarm base link
-            return False
-        if name.startswith("link_"):
+        if name.startswith("index") or name.startswith("middle") or name.startswith("ring") or name.startswith("thumb"):
             return True
-        if include_palm and name in {"palm", "base_link"}:
-            return True
-        # exclude xArm links: link1..link6
-        if name in {"wrist"} and include_palm:
+        if include_palm and name.startswith("palm"):
             return True
         return False
 
@@ -119,7 +126,10 @@ def parse_urdf_for_hand_links(urdf_path: str, include_palm: bool = False) -> Lis
     # from pdb import set_trace
     # set_trace()
     # Ensure finger links are covered at least
-    if len([l for l in links if l.name.startswith("link_")]) == 0:
+    # if len([l for l in links if l.name.startswith("link_")]) == 0:
+    #     print("[WARN] No Allegro finger links found in URDF. Check naming conventions.")
+    #     exit()
+    if len([l for l in links if "link" in l.name]) == 0:
         print("[WARN] No Allegro finger links found in URDF. Check naming conventions.")
         exit()
     return links
@@ -184,6 +194,11 @@ def load_collision_trimesh(base_dir: str, col: CollisionGeometry) -> trimesh.Tri
             alt = os.path.join(base_dir, os.path.basename(mesh_path))
             if os.path.isfile(alt):
                 resolved = alt
+            elif base_dir.split("/")[-1] == mesh_path.split("/")[0]:
+                alt = os.path.join(base_dir, *mesh_path.split("/")[1:])
+                
+            if os.path.isfile(alt):
+                resolved = alt
             else:
                 raise FileNotFoundError(f"Mesh file not found: {mesh_path} (resolved: {resolved})")
         mesh = trimesh.load(resolved, force='mesh')
@@ -227,34 +242,89 @@ def trimesh_to_o3d(mesh: trimesh.Trimesh) -> o3d.geometry.TriangleMesh:
     return o3
 
 
+# def hash_color(name: str) -> Tuple[float, float, float]:
+#     """Deterministic pseudo-random color from link name (in 0..1)."""
+#     # randomize hue -> rgb
+#     h = 0
+#     for ch in name:
+#         h = (h * 131 + ord(ch)) & 0xFFFFFFFF
+#     hue = (h % 360) / 360.0
+#     sat = 0.65
+#     val = 0.95
+#     i = int(hue * 6.0)
+#     f = hue * 6.0 - i
+#     p = val * (1.0 - sat)
+#     q = val * (1.0 - f * sat)
+#     t = val * (1.0 - (1.0 - f) * sat)
+#     i = i % 6
+#     if i == 0:
+#         r, g, b = val, t, p
+#     elif i == 1:
+#         r, g, b = q, val, p
+#     elif i == 2:
+#         r, g, b = p, val, t
+#     elif i == 3:
+#         r, g, b = p, q, val
+#     elif i == 4:
+#         r, g, b = t, p, val
+#     else:
+#         r, g, b = val, p, q
+#     return (float(r), float(g), float(b))
+
+
+import re
+
+def _hsv_to_rgb(h: float, s: float, v: float) -> Tuple[float, float, float]:
+    i = int(h * 6.0)
+    f = h * 6.0 - i
+    p = v * (1.0 - s)
+    q = v * (1.0 - f * s)
+    t = v * (1.0 - (1.0 - f) * s)
+    i %= 6
+    if i == 0: r, g, b = v, t, p
+    elif i == 1: r, g, b = q, v, p
+    elif i == 2: r, g, b = p, v, t
+    elif i == 3: r, g, b = p, q, v
+    elif i == 4: r, g, b = t, p, v
+    else: r, g, b = v, p, q
+    return float(r), float(g), float(b)
+
 def hash_color(name: str) -> Tuple[float, float, float]:
-    """Deterministic pseudo-random color from link name (in 0..1)."""
-    # randomize hue -> rgb
-    h = 0
+    """
+    为 link 名生成可区分的颜色（0..1）。
+    - 名字哈希决定 base hue（稳定、与不同前缀区分）
+    - 若名字以数字结尾（如 *_12），用黄金比例步进分散色相，并交替亮度/饱和度
+    """
+    # 1) 32-bit 稳定哈希（FNV-1a 简化版）
+    h = 2166136261
     for ch in name:
-        h = (h * 131 + ord(ch)) & 0xFFFFFFFF
-    hue = (h % 360) / 360.0
-    sat = 0.65
-    val = 0.95
-    i = int(hue * 6.0)
-    f = hue * 6.0 - i
-    p = val * (1.0 - sat)
-    q = val * (1.0 - f * sat)
-    t = val * (1.0 - (1.0 - f) * sat)
-    i = i % 6
-    if i == 0:
-        r, g, b = val, t, p
-    elif i == 1:
-        r, g, b = q, val, p
-    elif i == 2:
-        r, g, b = p, val, t
-    elif i == 3:
-        r, g, b = p, q, val
-    elif i == 4:
-        r, g, b = t, p, val
+        h ^= ord(ch)
+        h = (h * 16777619) & 0xFFFFFFFF
+    base = (h / 2**32)  # 0..1
+
+    # 2) 解析末尾序号（index_link_0 -> k=0）
+    m = re.search(r'(\d+)$', name)
+    k = int(m.group(1)) if m else -1
+
+    # 3) 色相：base + 黄金比例步进（避免相邻色相过近）
+    phi = 0.6180339887498949
+    hue = (base + (k if k >= 0 else 0) * phi) % 1.0
+
+    # 4) 亮度/饱和度交替：相邻序号即使色相接近也能区分
+    if k >= 0:
+        # 三态循环能更稳：高亮/中亮/低亮 + 饱和度微调
+        mode = k % 3
+        if mode == 0:
+            sat, val = 0.70, 0.95
+        elif mode == 1:
+            sat, val = 0.85, 0.80
+        else:
+            sat, val = 0.65, 0.70
     else:
-        r, g, b = val, p, q
-    return (float(r), float(g), float(b))
+        # 无序号：给个通用的、较鲜明的默认
+        sat, val = 0.70, 0.92
+
+    return _hsv_to_rgb(hue, sat, val)
 
 
 def build_global_points_and_meshes(link_names: List[str],
@@ -540,6 +610,7 @@ def main():
         print(f"[ERROR] URDF not found: {urdf_path}")
         sys.exit(1)
     base_dir = os.path.dirname(os.path.abspath(urdf_path))
+    # breakpoint()
 
     link_to_local_meshes_all, link_to_world_meshes_all = build_robot_world_meshes(urdf_path, base_dir)
     T_world = compute_fk_zero(urdf_path)
