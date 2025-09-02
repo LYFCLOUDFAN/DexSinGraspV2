@@ -9,10 +9,12 @@ from omegaconf import DictConfig, OmegaConf
 
 from .functional_manipulation_underarm import ShadowHandFunctionalManipulationUnderarm
 from .singulation_grasp import XArmAllegroHandFunctionalManipulationUnderarm
+from .unpack_singulation_grasp import XArmAllegroHandCubeInBox
 
 # isaacgym_task_map["ShadowHandFunctionalManipulation"] = ShadowHandFunctionalManipulation
 isaacgym_task_map["ShadowHandFunctionalManipulationUnderarm"] = ShadowHandFunctionalManipulationUnderarm
 isaacgym_task_map["XArmAllegroHandFunctionalManipulationUnderarm"] = XArmAllegroHandFunctionalManipulationUnderarm
+isaacgym_task_map["XArmAllegroHandCubeInBox"] = XArmAllegroHandCubeInBox
 # isaacgym_task_map["ShadowHand"] = ShadowHand
 
 

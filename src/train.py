@@ -147,7 +147,8 @@ if __name__ == "__main__":
             ]
         elif "env_mode=pgm" in args.overrides:
             # Check if using XArm Allegro task or Shadow Hand task
-            if "task=XArmAllegroHandFunctionalManipulationUnderarm" in args.overrides:
+            if "task=XArmAllegroHandFunctionalManipulationUnderarm" in args.overrides \
+                or "task=XArmAllegroHandCubeInBox" in args.overrides:
                 obs_space = [
                     # Hand state
                     "xarm_endeffector_position",
