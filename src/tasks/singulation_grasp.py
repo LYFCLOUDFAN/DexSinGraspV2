@@ -3142,20 +3142,18 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
     def compute_curiosity_reward(self):
         """Compute the curiosity reward."""
         
-    
-        curiosity_obs, nearest_contact = self.compute_curiosity_observations()  
-        exploration_mask = ~self.picked
+        curiosity_obs, nearest_contact = self.compute_curiosity_observations()
+
+        masked_obs = curiosity_obs
         exploration_bonus = torch.zeros(self.num_envs, device=self.device)
-        if exploration_mask.any():
-            masked_obs = curiosity_obs[exploration_mask]
-            masked_bonus = self.curiosity_handler.update_curiosity(
-                masked_obs, self.curiosity_reward_scale
-            )
-            exploration_bonus[exploration_mask] = masked_bonus * 40
+        if self.cfg["env"]["curiosity"]["mechanism"] == "fibonacci":
+            masked_obs = masked_obs.reshape(-1, 4, 3) # (#env, #finger, 3)
+        masked_bonus = self.curiosity_handler.update_curiosity(
+            masked_obs, self.curiosity_reward_scale
+        )
+        exploration_bonus = masked_bonus * 40
             
         self.extras["curiosity_reward"] = exploration_bonus.clone()
-        self.extras["exploration_rate"] = exploration_mask.float().clone()
-        
         return exploration_bonus
     
     def compute_fingertip_to_obj_center_reward(self):
