@@ -879,23 +879,33 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         
 
         # self.enable_curiosity = self.cfg["env"].get("enableCuriosity", False)
-        self.curiosity_repr = self.cfg["env"].get("curiosityRepresentation", "nearest_surface")
-        curiosity_cfg = self.cfg["env"]["curiosity"]
-        self.curiosity_handler = NeuralHashCuriosity(
-            curiosity_cfg, self.device, self.num_envs
-        )
-        self.curiosity_reward_scale = curiosity_cfg["reward_scale"]
+        # self.curiosity_repr = self.cfg["env"].get("curiosityRepresentation", "nearest_surface")
+        # curiosity_cfg = self.cfg["env"]["curiosity"]
+        # self.curiosity_handler = NeuralHashCuriosity(
+        #     curiosity_cfg, self.device, self.num_envs
+        # )
+        self.curiosity_reward_scale = self.cfg["env"]["curiosity"]["reward_scale"]
+        
+        from .curiosity import build_curiosity
+        self.curiosity_handler = build_curiosity(self.cfg["env"]["curiosity"], self.device, self.num_envs)
         
         self.random_init_around_object = self.cfg["env"].get("randomInitAroundObject", False)
         self.random_init_radius = float(self.cfg["env"].get("randomInitRadius", 0.25))
-        self.random_init_only_training = bool(self.cfg["env"].get("randomInitOnlyTraining", True))
         
-        self.use_precomputed_poses = self.cfg["env"].get("usePrecomputedPoses", False)
-        self.precomputed_poses_file = self.cfg["env"].get("precomputedPosesFile", "data/precomputed_arm_poses.pt")
+        # for sphere sampling
+        self.use_precomputed_poses = self.cfg["env"].get("usePrecomputedPoses", False) and (not self.random_init_around_object)
+        self.precomputed_poses_file = self.cfg["env"].get("precomputedPosesFile", "data/pre_pose_arm_poses.pt")
         self.precomputed_pose_bank = None
         if self.use_precomputed_poses:
             self._load_precomputed_poses()
         
+        # pre pose sampling
+        self.use_pre_poses_init = self.cfg["env"].get("usePrePosesInit", False) and (not self.random_init_around_object)
+        self.pre_poses_file = self.cfg["env"].get("prePosesFile", "data/pre_pose_arm_poses.pt")
+        self.pre_poses_z_offset = self.cfg["env"].get("prePosesTransOffset", 0.02)
+        self.pre_poses_bank = None
+        if self.use_pre_poses_init:
+            self._load_pre_poses()
         
         # Exploration logging
         self.enable_exploration_logging = self.cfg["env"].get("enableExplorationLogging", False)
@@ -2629,6 +2639,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         # create the actor
         actor = self.gym.create_actor(env, asset, pose, name, group, filter, 0)
+        # actor = self.gym.create_actor(env, asset, pose, name, 0, 1, 0) # ik solving use
 
         # set the dof properties if `dof_props` exists in the config
         dof_props = config.get("dof_props", None)
@@ -4354,9 +4365,9 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.actions[env_ids, :] = 0
         
 
-        if self.use_precomputed_poses:
-            self.sample_precomputed_pose(env_ids)
-        elif self.random_init_around_object and (not self.random_init_only_training or self.training):
+        if self.use_precomputed_poses or self.use_pre_poses_init:
+            self.apply_precomputed_poses(env_ids)
+        elif self.random_init_around_object and self.training:
             self.sample_initial_pose(env_ids)
 
     def get_env_metainfo(self, field: Optional[str] = None) -> Union[pd.DataFrame, Sequence]:
@@ -4508,6 +4519,18 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.precomputed_pose_bank = poses
         print(f"[precomputed] Loaded {poses.shape[0]} poses from {self.precomputed_poses_file}")
         
+    def _load_pre_poses(self) -> None:
+        """Load pre-poses from disk."""
+        if not os.path.isfile(self.pre_poses_file):
+            print(f"[pre-poses] File not found: {self.pre_poses_file}")
+            self.use_pre_poses_init = False
+            return
+        data = torch.load(self.pre_poses_file, map_location="cpu")
+        poses = data["poses"]  # (N, num_dofs)
+        assert poses.ndim == 2 and poses.shape[1] == self.num_dofs, "Pose dim mismatch"
+        self.pre_poses_bank = poses.to(self.device)
+        print(f"[pre-poses] Loaded {poses.shape[0]} poses from {self.pre_poses_file}")
+        
     @torch.no_grad()
     def _log_exploration_contacts_step(self) -> None:
         """Accumulate per-fingertip voxel counts of contact-filtered points in object-local frame."""
@@ -4573,13 +4596,20 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         print(f"[exploration] saved voxel density to: {path}")
 
     @torch.no_grad()
-    def sample_precomputed_pose(self, env_ids: torch.LongTensor) -> None:
+    def apply_precomputed_poses(self, env_ids: torch.LongTensor) -> None:
         """Randomly assign a precomputed DOF vector to each env in env_ids."""
-        if self.precomputed_pose_bank is None or self.precomputed_pose_bank.shape[0] == 0:
+        if (self.precomputed_pose_bank is None or self.precomputed_pose_bank.shape[0] == 0) \
+            and (self.pre_poses_bank is None or self.pre_poses_bank.shape[0] == 0):
             return
+        assert not (self.use_precomputed_poses and self.use_pre_poses_init), "use both precomputed and pre-poses init"
         k = env_ids.shape[0]
-        idx = torch.randint(0, self.precomputed_pose_bank.shape[0], (k,))
-        sampled = self.precomputed_pose_bank[idx].to(self.device)  # (k, num_dofs)
+        if self.use_pre_poses_init:
+            sampled = self.pre_poses_bank[self.occupied_object_relative_indices[env_ids]].to(self.device)  # (k, num_dofs)
+        elif self.use_precomputed_poses:
+            idx = torch.randint(0, self.precomputed_pose_bank.shape[0], (k,))
+            sampled = self.precomputed_pose_bank[idx].to(self.device)  # (k, num_dofs)
+        else:
+            raise ValueError("No pre-poses to apply")
 
         self.allegro_hand_dof_positions[env_ids, :] = sampled
         self.allegro_hand_dof_velocities[env_ids, :] = 0.0
@@ -5036,7 +5066,10 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         
 
         palm_quat = self.quaternion_from_direction_6d(dirs)
-        # palm_quat = torch.tensor([0.5, 0.5, -0.5, 0.5], device=device).expand(n, 4) # defualt rot
+        
+        if self.use_pre_poses_init or True: # overwrite target
+            palm_pos = self.occupied_object_init_root_positions[env_ids] + torch.tensor([0 , 0.12, self._obj_height/2 + self.pre_poses_z_offset], device=device).expand(n, 3)
+            palm_quat = torch.tensor([0.5, 0.5, -0.5, 0.5], device=device).expand(n, 4) # defualt rot
         
         p2f_q = self._hand_base_link2forearm_quat.expand(n, 4)
         p2f_t = self._hand_base_link2forearm_pos.expand(n, 3)
@@ -5057,8 +5090,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         
         # Move via IK to target EEF pose
         self.move_arm_to_pose(target_pos, target_quat)
-        
-        
+
+
     @staticmethod
     def quaternion_from_direction_6d(vec_d: torch.Tensor) -> torch.Tensor:
         """
