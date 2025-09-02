@@ -608,7 +608,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         self.stack_frame_number = self.cfg["env"]["stackFrameNumber"]
         self.frames = deque([], maxlen=self.stack_frame_number)
-        self.goal_position = torch.tensor([0.0, 0.4, 0.75], device=sim_device, dtype=torch.float)
+        self.goal_position = torch.tensor([0.0, 0.5, 0.75], device=sim_device, dtype=torch.float)
         # self.goal_position = torch.tensor([0.0, 0.2, 1.0], device=sim_device, dtype=torch.float)
         self.goal_orientation = torch.tensor([0.0, 0.0, 0.0, 1.0], device=sim_device, dtype=torch.float)
         # non-target object
@@ -626,8 +626,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.num_fingertips = len(self._fingertips)
 
         # self.__create_functional_grasping_dataset(device=sim_device)
-        self.__create_box_grid_dataset(device=sim_device)
-        self.__configure_mdp_spaces()
+        self._create_box_grid_dataset(device=sim_device)
+        self._configure_mdp_spaces()
 
         super().__init__(  # create_sim
             config=self.cfg,
@@ -639,10 +639,10 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             force_render=force_render,
         )
         # reconfig viewer
-        self.__configure_viewer()
+        self._configure_viewer()
         # HACK: not used
         # self.__reset_grasping_joint_indices()
-        self.__reset_action_indices()
+        self._reset_action_indices()
 
         # retrieve generic tensor descriptors for the simulation
         # - root_states: [num_envs * num_actors, 13]
@@ -1253,7 +1253,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
     def eval(self, vis=False):
         self.training = False
 
-    def __configure_viewer(self):
+    def _configure_viewer(self):
         """Viewer setup."""
         if self.viewer != None:
             cam_pos = gymapi.Vec3(1.0, 0.0, 0.2)
@@ -1656,7 +1656,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
                 quat_conjugate(self.allegro_hand_center_orientations), norm_object_orientation
             )
 
-    def __configure_specifications(self, specs: Dict, mdp_type: str) -> None:
+    def _configure_specifications(self, specs: Dict, mdp_type: str) -> None:
         assert "__dim__" in specs, "spec must contain `__dim__`"
         assert mdp_type in ["observation", "action"], "mdp_type must be either `observation` or `action`"
 
@@ -1680,7 +1680,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             _specs.append(Spec(name, dim, **info))
         return _specs
 
-    def __configure_observation_specs(self, observation_specs: Dict) -> None:
+    def _configure_observation_specs(self, observation_specs: Dict) -> None:
         """Configure the observation specifications.
 
         All the observation specifications are stored in `self._observation_specs`
@@ -1688,7 +1688,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         Args:
             observation_specs (Dict): The observation specifications. (cfg["env"]["observation_specs"])
         """
-        self._observation_specs = self.__configure_specifications(observation_specs, "observation")
+        self._observation_specs = self._configure_specifications(observation_specs, "observation")
 
     def __configure_action_specs(self, action_specs: Dict) -> None:
         """Configure the action specifications.
@@ -1698,7 +1698,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         Args:
             action_specs (Dict): The action specifications. (cfg["env"]["action_specs"])
         """
-        self._action_specs = self.__configure_specifications(action_specs, "action")
+        self._action_specs = self._configure_specifications(action_specs, "action")
 
     def export_observation_metainfo_frame(self) -> pd.DataFrame:
         """Export the observation metainfo as pandas dataframe.
@@ -1802,7 +1802,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         """
         return self._get_action_spec(name).dim
 
-    def __configure_mdp_spaces(self) -> None:
+    def _configure_mdp_spaces(self) -> None:
         """Configure the observation, state and action spaces for the task.
 
         Define the scale and offset for each observation, state and action. Calculate the total number of observations,
@@ -1815,7 +1815,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.cfg["env"]["numActions"] = self.num_actions
 
         # configure observation space
-        self.__configure_observation_specs(self.cfg["env"]["observationSpecs"])
+        self._configure_observation_specs(self.cfg["env"]["observationSpecs"])
         observation_space = self.cfg["env"]["observationSpace"]
         observation_space_extra = self.cfg["env"]["observationSpaceExtra"]
         observation_space_extra = [] if observation_space_extra is None else observation_space_extra
@@ -1883,7 +1883,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         plane_params.dynamic_friction = dynamic_friction
         self.gym.add_ground(self.sim, plane_params)
 
-    def __define_table(self) -> Dict[str, Any]:
+    def _define_table(self) -> Dict[str, Any]:
         asset_options = gymapi.AssetOptions()
         asset_options.fix_base_link = True
         asset_options.flip_visual_attachments = False
@@ -1914,7 +1914,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         }
         
 
-    def __define_upper_shelf(self) -> Dict[str, Any]:
+    def _define_upper_shelf(self) -> Dict[str, Any]:
         asset_options = gymapi.AssetOptions()
         asset_options.fix_base_link = True
         asset_options.flip_visual_attachments = False
@@ -2038,7 +2038,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.allegro_fingers_actuated_dof_indices = _torchify(allegro_fingers_actuated_dof_indices)
         self.allegro_thumb_actuated_dof_indices = _torchify(allegro_thumb_actuated_dof_indices)
 
-    def __define_allegro_hand_with_arm(
+    def _define_allegro_hand_with_arm(
         self, asset_name: str = "allegro Hand + xarm"
     ) -> Dict[str, Any]:
         """Define & load the allegro Hand + xarm asset.
@@ -2220,7 +2220,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         print(">>> xArm6 + Allegro Hand loaded")
         return config
 
-    def __define_object(self, dataset: str = "boxes") -> Dict[str, Any]:
+    def _define_object(self, dataset: str = "boxes") -> Dict[str, Any]:
         """Define & load objects for the current scene.
 
         For singulation task, we create a grid of boxes instead of loading dataset objects.
@@ -2231,9 +2231,9 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         Returns:
             Dict[str, Any]: The configuration of the objects.
         """
-        return self.__create_box_grid()
+        return self._create_box_grid()
 
-    def __define_object_deprecated(self, dataset: str = "boxes") -> Dict[str, Any]:
+    def _define_object_deprecated(self, dataset: str = "boxes") -> Dict[str, Any]:
         """Define & load objects for the current scene.
 
         For singulation task, we create a grid of boxes instead of loading dataset objects.
@@ -2329,7 +2329,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         print(">>> Objects loaded")
         return config
 
-    def __create_box_grid(self) -> Dict[str, Any]:
+    def _create_box_grid(self) -> Dict[str, Any]:
         """Create a grid of boxes for singulation task.
 
         Returns:
@@ -2499,7 +2499,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         return config
 
-    def __define_visual_target_object(self, asset_name: str = "Visual Target Object") -> Dict[str, Any]:
+    def _define_visual_target_object(self, asset_name: str = "Visual Target Object") -> Dict[str, Any]:
         """Define a visual-only asset to represent the goal position in the environment.
 
         Args:
@@ -2534,7 +2534,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         print(f">>> {asset_name} loaded")
         return config
 
-    def __define_camera(self) -> None:
+    def _define_camera(self) -> None:
         """Define the cameras for the rendering."""
         if not self.enable_rendered_pointcloud_observation and not self.save_video:
             return
@@ -2570,7 +2570,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             torch.tensor([self._table_x_length / 2, self._table_y_length / 2, 1.20], device=self.device),
         )
 
-    def __create_box_grid_dataset(self, device=None) -> None:
+    def _create_box_grid_dataset(self, device=None) -> None:
         # Create simple box grid dataset for singulation task
         from .dataset import BoxGridDataset
 
@@ -2598,7 +2598,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         print("grasping dataset joints:", self.grasping_dataset.dof_names)
         self.grasping_joint_indices = torch.tensor(indices).long().to(self.device)
 
-    def __reset_action_indices(self) -> None:
+    def _reset_action_indices(self) -> None:
         (
             self.arm_trans_action_indices,
             self.arm_rot_action_indices,
@@ -2606,7 +2606,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             self.hand_action_indices,
         ) = get_action_indices(self._action_space, device=self.device)
 
-    def __create_sim_actor(
+    def _create_sim_actor(
         self,
         env: gymapi.Env,
         config: Dict[str, Any],
@@ -2733,16 +2733,16 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
         print(">>> Defining gym assets")
 
-        self.gym_assets["current"]["robot"] = self.__define_allegro_hand_with_arm()
-        self.gym_assets["current"]["objects"] = self.__define_object()
-        self.gym_assets["current"]["table"] = self.__define_table()
-        self.gym_assets["current"]["visual_target_object"] = self.__define_visual_target_object()
+        self.gym_assets["current"]["robot"] = self._define_allegro_hand_with_arm()
+        self.gym_assets["current"]["objects"] = self._define_object()
+        self.gym_assets["current"]["table"] = self._define_table()
+        self.gym_assets["current"]["visual_target_object"] = self._define_visual_target_object()
         if self.use_upper_shelf:
-            self.gym_assets["current"]["upper_shelf"] = self.__define_upper_shelf()
+            self.gym_assets["current"]["upper_shelf"] = self._define_upper_shelf()
 
         # self.gym_assets["target"]["robot"] = self.__define_target_allegro_hand()
 
-        self.__define_camera()
+        self._define_camera()
 
         print(">>> Done defining gym assets")
 
@@ -2779,7 +2779,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
                     raise RuntimeError("begin_aggregate failed")
 
             # add allegro hand to the environment
-            actor_index, actor_handle = self.__create_sim_actor(
+            actor_index, actor_handle = self._create_sim_actor(
                 env, self.gym_assets["current"]["robot"], i, actor_handle=True
             )
             allegro_hand_indices.append(actor_index)
@@ -2795,11 +2795,11 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
                 targ_obj_color = gymapi.Vec3(0.9, 0.9, 0.9)
 
                 if is_target:
-                    actor_index = self.__create_sim_actor(env, cfg, i, "targ_obj", pose, color=targ_obj_color)
+                    actor_index = self._create_sim_actor(env, cfg, i, "targ_obj", pose, color=targ_obj_color)
                 else:
                     surr_obj_name = f"sur_obj_{surr_obj_cur_idx}"
                     surr_obj_cur_idx += 1
-                    actor_index = self.__create_sim_actor(env, cfg, i, surr_obj_name, pose, color=surr_obj_color)
+                    actor_index = self._create_sim_actor(env, cfg, i, surr_obj_name, pose, color=surr_obj_color)
 
 
                 object_indices[i].append(actor_index)
@@ -2815,19 +2815,19 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
                 scene_object_indices[i].append(k)  # relative index within environment
 
             # add table to the environment
-            actor_index, actor_handle = self.__create_sim_actor(
+            actor_index, actor_handle = self._create_sim_actor(
                 env, self.gym_assets["current"]["table"], -1, actor_handle=True, color=gymapi.Vec3(0.0, 0.0, 0.0)
             )
             table_indices.append(actor_handle)
 
             if self.use_upper_shelf:
-                actor_index, actor_handle = self.__create_sim_actor(
+                actor_index, actor_handle = self._create_sim_actor(
                     env, self.gym_assets["current"]["upper_shelf"], -1, actor_handle=True, color=gymapi.Vec3(0.0, 0.0, 0.0)
                 )
                 upper_shelf_indices.append(actor_handle)
 
             # add visual target object to the environment
-            actor_index, actor_handle = self.__create_sim_actor(
+            actor_index, actor_handle = self._create_sim_actor(
                 env, self.gym_assets["current"]["visual_target_object"], i + self.num_envs, actor_handle=True, color=gymapi.Vec3(0.6, 0.72, 0.98)
             )
             visual_target_object_indices.append(actor_handle)
@@ -3701,7 +3701,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         # 0.5 * 600 = 300
         if not hasattr(self, "goal_position"):
             # self.goal_position = torch.tensor([0.0, 0.5, 0.75], device=self.device, dtype=torch.float)
-            self.goal_position = torch.tensor([0.0, 0.4, 0.75], device=self.device, dtype=torch.float)
+            self.goal_position = torch.tensor([0.0, 0.5, 0.75], device=self.device, dtype=torch.float)
         self.goal_position_dist = torch.norm(
             self.goal_position.unsqueeze(0) - self.object_root_positions, dim=1
         )
