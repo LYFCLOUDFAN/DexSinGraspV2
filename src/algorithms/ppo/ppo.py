@@ -761,6 +761,9 @@ class PPO:
             if self.writer is not None:
                 self.writer.add_scalar("Eval/success_rate", sr_mu, it)
                 self.writer.add_scalar("Eval/eval_rews", eval_rews, it)
+            
+            if self.vec_env.enable_exploration_logging:
+                self.vec_env.save_exploration_density(os.path.join(self.log_dir, f"exploration_data_{it}.pt"))
 
     def train(self, num_learning_iterations, log_interval=1):
         # rewbuffer = deque(maxlen=100)
