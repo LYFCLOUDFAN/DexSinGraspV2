@@ -7,7 +7,7 @@ python src/train.py \
     headless=False \
     env_mode=pgm \
     env_info=True \
-    num_envs=2048 \
+    num_envs=4096 \
     num_objects=5 \
     num_objects_per_env=1 \
     graphics_device_id=0 \
