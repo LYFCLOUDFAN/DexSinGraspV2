@@ -100,6 +100,7 @@ class PPO:
         self.init_noise_std = learn_cfg["init_noise_std"]
         self.normalize_input = learn_cfg["normalize_input"]
         self.normalize_value = learn_cfg["normalize_value"]
+        self.value_bootstrap = learn_cfg.get("value_bootstrap", False)
         self.model_cfg = self.cfg_train["policy"]
         self.num_transitions_per_env = learn_cfg["nsteps"]
         self.learning_rate = learn_cfg["optim_stepsize"]
@@ -109,6 +110,8 @@ class PPO:
         self.num_mini_batches = learn_cfg["nminibatches"]
         self.value_loss_coef = learn_cfg.get("value_loss_coef", 2.0)
         self.entropy_coef = learn_cfg["ent_coef"]
+        self.bounds_loss_coef = learn_cfg.get("bounds_loss_coef", 0.0)
+        self.reward_scale_value = learn_cfg.get("reward_scale_value", 1.0)
         self.gamma = learn_cfg["gamma"]
         self.lam = learn_cfg["lam"]
         self.max_grad_norm = learn_cfg.get("max_grad_norm", 2.0)
@@ -214,7 +217,7 @@ class PPO:
 
         self.optimizer = optim.Adam(
             filter(lambda p: p.requires_grad, self.actor_critic.parameters()), lr=self.learning_rate, 
-            # eps=1e-5
+            eps=1e-5
         )
         """SDE."""
         if "gf" in self.vec_env.observation_info:
@@ -385,10 +388,14 @@ class PPO:
     def set_test(self, vis=False):
         self.actor_critic.eval()
         self.vec_env.eval(vis=vis)
+        if self.normalize_value:
+            self.value_running_mean_std.eval()  
 
     def set_train(self):
         self.actor_critic.train()
         self.vec_env.train()
+        if self.normalize_value:
+            self.value_running_mean_std.train()
 
     def save(self, path):
         weights = {
@@ -396,6 +403,7 @@ class PPO:
             "optimizer": self.optimizer.state_dict(),
             "iteration": self.current_learning_iteration,
             "tot_timesteps": self.tot_timesteps,
+            "value_rms": self.value_running_mean_std.state_dict(),
         }
         torch.save(weights, path)
 
@@ -511,7 +519,8 @@ class PPO:
 
                         if "gf" in self.vec_env.observation_info:
                             self.vec_env.action_gf = grad.clone()
-                        next_obs, rews, dones, infos = self.vec_env.step(step_actions)
+                        clamped_actions = torch.clamp(step_actions, -1.0, 1.0)
+                        next_obs, rews, dones, infos = self.vec_env.step(clamped_actions)
 
                         self.demo_action = torch.cat(
                             [
@@ -682,11 +691,17 @@ class PPO:
                             # print(step_actions)
                             # set done env action to be zero
                             done_env_ids = (eval_done_envs > 0).nonzero(as_tuple=False).squeeze(-1)
+                            # breakpoint()
+                            # print("shape of done_env_ids:", done_env_ids.shape)
+                            # print("num done envs:", len(done_env_ids))
                             step_actions[done_env_ids, :] = 0
 
                             if "gf" in self.vec_env.observation_info:
                                 self.vec_env.action_gf = grad.clone()
-                            next_obs, rews, dones, infos = self.vec_env.step(step_actions)
+                            clamped_actions = torch.clamp(step_actions, -1.0, 1.0)
+                            next_obs, rews, dones, infos = self.vec_env.step(clamped_actions)
+                            
+                            # print("num of dones:", dones.sum())
 
                             if plot_direction:
                                 arm_diff_direction.append(
@@ -703,6 +718,8 @@ class PPO:
                             current_obs.copy_(next_obs["obs"])
 
                             # done
+                            # print("shape of dones:", dones.shape)
+                            # print("shape of eval_done_envs:", eval_done_envs.shape)
                             new_done_env_ids = (dones & (1 - eval_done_envs)).nonzero(as_tuple=False).squeeze(-1)
                             if len(new_done_env_ids) > 0:
                                 # if 0 in new_done_env_ids:
@@ -727,10 +744,10 @@ class PPO:
                                 # rot_dist[new_done_env_ids] = infos["rot_dist"][new_done_env_ids]
                                 # contact_dist[new_done_env_ids] = infos["fj_dist"][new_done_env_ids]
 
-                                eval_done_envs[new_done_env_ids] = 1
                                 success_env_ids = (
-                                    (rews >= self.vec_env.reach_goal_bonus).nonzero(as_tuple=False).squeeze(-1)
+                                    ((self.vec_env.successes > 0) & dones & (1 - eval_done_envs)).nonzero(as_tuple=False).squeeze(-1)
                                 )
+                                eval_done_envs[new_done_env_ids] = 1
                                 successes[success_env_ids] = 1
                                 eps_len[new_done_env_ids] = self.vec_env.progress_buf[new_done_env_ids]
                                 succ_eps_len.extend(self.vec_env.progress_buf[success_env_ids].cpu().numpy().tolist())
@@ -740,7 +757,7 @@ class PPO:
                                 # for id in self.vec_env.successes.nonzero(as_tuple=False):
                                 #     print(fj_dist[id], contact_dist[id], pos_dist[id], rot_dist[id])
                                 assert torch.sum(eval_done_envs).item() == self.vec_env.num_envs
-                                success_rates.append(infos["success_num"] / self.vec_env.num_envs)
+                                success_rates.append(torch.sum(successes).unsqueeze(-1) / self.vec_env.num_envs)
                                 eps_len_all.append(eps_len.float().mean().item())
                                 succ_eps_len_all.append(np.mean(succ_eps_len))
 
@@ -794,16 +811,22 @@ class PPO:
                 # Step the vec_environment
                 if "gf" in self.vec_env.observation_info:
                     self.vec_env.action_gf = grad.clone()
-                next_obs, rews, dones, infos = self.vec_env.step(step_actions)
+                clamped_actions = torch.clamp(step_actions, -1.0, 1.0)
+                next_obs, rews, dones, infos = self.vec_env.step(clamped_actions)
                 next_states = self.vec_env.get_state()
                 
                 self.actor_critic.update_normalization(next_obs["obs"])
-
-                rewards = rews.unsqueeze(-1)
+                
+                shaped_rewards = self.reward_scale_value * rews.clone()
+                # add for value bootstrap if the episode ends because of timeout
+                if self.value_bootstrap and 'time_outs' in infos:
+                    shaped_rewards += self.gamma * values.squeeze(-1) * infos['time_outs'].float()
+                    
+                rewards = shaped_rewards.unsqueeze(-1)
 
                 # Record the transition
                 self.storage.add_transitions(
-                    storage_obs, current_states, actions, rews, dones, values, actions_log_prob, mu, sigma
+                    storage_obs, current_states, actions, shaped_rewards, dones, values, actions_log_prob, mu, sigma
                 )
                 current_obs.copy_(next_obs["obs"])
                 current_states.copy_(next_states)
@@ -843,8 +866,26 @@ class PPO:
             # Learning step
             start = stop
             self.storage.compute_returns(last_values, self.gamma, self.lam)
+            
+            values = self.storage.values
+            returns = self.storage.returns
+            # print("before norm:")
+            # print("returns:", returns.mean().item())
+            # print("values:", values.mean().item())
+            if self.normalize_value:
+                values = self.value_running_mean_std(values)
+                returns = self.value_running_mean_std(returns)
+            self.storage.values = values
+            self.storage.returns = returns
+            
+            # print("storage items:")
+            # print("rewards:", self.storage.rewards.mean().item())
+            # print("returns:", self.storage.returns.mean().item())
+            # print("values:", self.storage.values.mean().item())
+            # print("actions:", self.storage.actions.mean().item())
+            # print("obses:", self.storage.observations.mean().item())
 
-            mean_value_loss, mean_surrogate_loss, mean_kl_loss = self.update()
+            mean_value_loss, mean_surrogate_loss, mean_kl_loss, mean_b_loss, mean_entropy = self.update()
             self.storage.clear()
             stop = time.time()
             learn_time = stop - start
@@ -912,6 +953,8 @@ class PPO:
                               'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
                 f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                 f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
+                f"""{'b_loss:':>{pad}} {locs['mean_b_loss']:.4f}\n"""
+                f"""{'Entropy:':>{pad}} {locs['mean_entropy']:.4f}\n"""
                 f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
                 f"""{'Mean reward:':>{pad}} {self.episode_rewards.get_mean():.2f}\n"""
                 f"""{'Mean episode length:':>{pad}} {self.episode_lengths.get_mean():.2f}\n"""
@@ -946,6 +989,8 @@ class PPO:
         mean_value_loss = 0
         mean_surrogate_loss = 0
         mean_kl_loss = 0
+        mean_b_loss = 0
+        mean_entropy = 0
 
         batch = self.storage.mini_batch_generator(self.num_mini_batches)
 
@@ -1055,8 +1100,16 @@ class PPO:
                     value_loss = torch.max(value_losses, value_losses_clipped).mean()
                 else:
                     value_loss = (returns_batch - value_batch).pow(2).mean()
+                    
+                if self.bounds_loss_coef > 0:
+                    soft_bound = 1.1
+                    mu_loss_high = torch.clamp_min(mu_batch - soft_bound, 0.0) ** 2
+                    mu_loss_low = torch.clamp_max(mu_batch + soft_bound, 0.0) ** 2
+                    b_loss = (mu_loss_low + mu_loss_high).sum(axis=-1).mean()
+                else:
+                    b_loss = 0.0
 
-                loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+                loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean() + self.bounds_loss_coef * b_loss
 
                 if self.args.exp_name == "ilad":
                     """Add demo_surrogate_loss."""
@@ -1073,13 +1126,17 @@ class PPO:
                 mean_value_loss += value_loss.item()
                 mean_surrogate_loss += surrogate_loss.item()
                 mean_kl_loss += kl_mean.item()
+                mean_b_loss += b_loss.item()
+                mean_entropy += entropy_batch.mean().item()
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
         mean_kl_loss /= num_updates
+        mean_b_loss /= num_updates
+        mean_entropy /= num_updates
 
-        return mean_value_loss, mean_surrogate_loss, mean_kl_loss
+        return mean_value_loss, mean_surrogate_loss, mean_kl_loss, mean_b_loss, mean_entropy
 
     """
     ILAD
@@ -1229,6 +1286,8 @@ class PPO:
                     actions_batch, actions_log_prob_batch, values_batch, mu_batch, sigma_batch = self.actor_critic.act(
                         obs_batch, current_states
                     )
+                    if self.normalize_value:
+                        values_batch = self.value_running_mean_std(values_batch, True)
                 else:
                     actions_batch = self.actor_critic.act_inference(obs_batch)
 
@@ -1256,6 +1315,8 @@ class PPO:
         else:
             if mode == "train":
                 actions, actions_log_prob, values, mu, sigma = self.actor_critic.act(current_obs, current_states)
+                if self.normalize_value:
+                    values = self.value_running_mean_std(values, True)
             else:
                 actions = self.actor_critic.act_inference(current_obs)
 
