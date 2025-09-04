@@ -21,8 +21,8 @@ policy: # only works for MlpPolicy right now
   hand_joint_dim: 16
   hand_wrist_dim: 7
   hand_state_dim: 23
-  pi_state_encoder_hid_sizes: [512,256]
-  vf_state_encoder_hid_sizes: [512,256]
+  pi_state_encoder_hid_sizes: [512,256,128]
+  vf_state_encoder_hid_sizes: [512,256,128]
   pcl_feature_dim: 64
   activation: elu # can be elu, relu, selu, crelu, lrelu, tanh, sigmoid
 
@@ -39,15 +39,18 @@ learn:
   max_iterations: 40000
 
   # training params
-  normalize_input: False
-  normalize_value: False
-  cliprange: 0.1 #0.2
+  normalize_input: True
+  normalize_value: True
+  value_bootstrap: True
+  cliprange: 0.2 #0.2
   ent_coef: 0
-  nsteps: 12
-  noptepochs: 2 #2 5
-  nminibatches: 4 #8 4 # this is per agent
+  bounds_loss_coef: 0.0001
+  reward_scale_value: 0.01
+  nsteps: 8
+  noptepochs: 5 #2 5
+  nminibatches: 8 #8 4 # this is per agent
   max_grad_norm: 1
-  optim_stepsize: 3.e-4 # 3e-4 is default for single agent training with constant schedule
+  optim_stepsize: 5.e-4 # 3e-4 is default for single agent training with constant schedule
   schedule: adaptive # could be adaptive or linear or fixed
   desired_kl: 0.016 #0.008 0.016
   gamma: 0.99 #0.99 0.96
