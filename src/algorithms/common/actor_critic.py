@@ -484,9 +484,9 @@ class ActorCritic(nn.Module):
     def act(self, observations: torch.Tensor, states: Optional[torch.Tensor] = None):
 
         if self.actor_obs_normalization:
-            observations = self.actor_obs_normalizer(observations)
-            
-        actions_mean = self.forward_actor(observations)
+            actor_observations = self.actor_obs_normalizer(observations)
+
+        actions_mean = self.forward_actor(actor_observations)
 
         # print(self.log_std)
         # covariance = torch.diag(self.log_std.exp() * self.log_std.exp())
