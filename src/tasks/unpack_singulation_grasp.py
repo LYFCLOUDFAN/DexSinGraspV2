@@ -138,7 +138,7 @@ class XArmAllegroHandCubeInBox(XArmAllegroHandFunctionalManipulationUnderarm):
         config["warehouse"] = {"targ_obj": [], "surr_obj": []}
 
         target_asset_options = gymapi.AssetOptions()
-        target_asset_options.density = 500.0
+        target_asset_options.density = 2000.0
         target_asset_options.convex_decomposition_from_submeshes = True
         target_asset_options.override_com = True
         target_asset_options.override_inertia = True
