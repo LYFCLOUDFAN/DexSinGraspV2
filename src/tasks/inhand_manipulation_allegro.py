@@ -226,6 +226,7 @@ class InhandManipulationAllegro(AllegroHand):
         dof_state = self.dof_state.view(self.num_envs, -1, 2)
         self.allegro_hand_dof_positions = dof_state[:, self.allegro_hand_dof_start : self.allegro_hand_dof_end, 0]
         self.allegro_hand_dof_velocities = dof_state[:, self.allegro_hand_dof_start : self.allegro_hand_dof_end, 1]
+        self.allegro_hand_dof_forces = self.dof_force_tensor[:, self.allegro_hand_dof_start : self.allegro_hand_dof_end]
         
         self.allegro_hand_rigid_body_states = self.rigid_body_states[
             :, self.allegro_hand_rigid_body_start : self.allegro_hand_rigid_body_end, :
@@ -267,7 +268,17 @@ class InhandManipulationAllegro(AllegroHand):
         self.max_per_cat = -1
         self.object_geo_level = "all"
         self.object_scale = "all"
-        
+
+        self.actions = torch.zeros((self.num_envs, self.num_actions), device=self.device)
+        self.reset_arm(first_time=True)
+
+    def reset_arm(self, first_time=False):
+        self.reset(first_time=first_time)
+        for _ in range(10):
+            if self.force_render:
+                self.render()
+            self.gym.simulate(self.sim)
+            self.compute_observations()
 
     def __configure_specifications(self, specs: Dict, mdp_type: str) -> None:
         assert "__dim__" in specs, "spec must contain `__dim__`"
@@ -427,8 +438,28 @@ class InhandManipulationAllegro(AllegroHand):
         return metainfo
     
     def reset(self, dones=None, first_time=False):
-        return super().reset()
-            
+        if dones is None:
+            env_ids = torch.arange(start=0, end=self.num_envs, device=self.device, dtype=torch.long)
+        else:
+            env_ids = dones.nonzero(as_tuple=False).flatten()
+
+        # reset idx
+        if env_ids.shape[0] > 0:
+            self.reset_idx(env_ids, first_time=first_time)
+
+        self.compute_observations(env_ids)
+
+        self.obs_dict["obs"] = torch.clamp(self.obs_buf, -self.clip_obs, self.clip_obs).to(self.rl_device)
+
+        # asymmetric actor-critic
+        if self.num_states > 0:
+            self.obs_dict["states"] = self.get_state()
+
+        return self.obs_dict
+
+    def reset_idx(self, env_ids: torch.LongTensor, first_time=False) -> None:
+        super().reset_idx(env_ids, env_ids)
+        
     def compute_observations(self, reset_env_ids: Optional[torch.LongTensor] = None) -> None:
         """Compute the observations.
 
@@ -479,7 +510,8 @@ class InhandManipulationAllegro(AllegroHand):
             elif "velocity" in spec.tags:
                 observation = observation * self.velocity_observation_scale
             elif "orientation" in spec.tags:
-                observation = quat_to_6d(observation)
+                # observation = quat_to_6d(observation)
+                observation = observation
 
             observations[spec.name] = observation
 
@@ -508,6 +540,7 @@ class InhandManipulationAllegro(AllegroHand):
         self.goal_pose = self.goal_states[:, 0:7]
         self.goal_pos = self.goal_states[:, 0:3]
         self.goal_rot = self.goal_states[:, 3:7]
+        self.goal_ori_dist = quat_mul(self.object_rot, quat_conjugate(self.goal_rot))
         
         self.object_root_positions = self.object_pos
         self.object_root_orientations = self.object_rot
@@ -1010,7 +1043,7 @@ class InhandManipulationAllegro(AllegroHand):
         self.rew_buf[:] += self.reach_rew_scaled
         
         self.curiosity_reward = self.compute_curiosity_reward()
-        # self.rew_buf[:] += self.curiosity_reward
+        self.rew_buf[:] += self.curiosity_reward
 
         # self.extras['consecutive_successes'] = self.consecutive_successes.mean()
 
@@ -1025,7 +1058,7 @@ class InhandManipulationAllegro(AllegroHand):
             if self.total_resets > 0:
                 print("Post-Reset average consecutive successes = {:.1f}".format(self.total_successes/self.total_resets))
         
-        self.extras["success_num"] = self.successes.clone()
+        self.extras["success_num"] = torch.sum(self.successes>0).unsqueeze(-1).clone()
         
     def train(self):
         self.training = True
