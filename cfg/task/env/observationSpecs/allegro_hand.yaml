@@ -21,6 +21,10 @@ allegro_hand_dof_velocity:
   attr: allegro_hand_dof_velocities
   tags: ["velocity"]
 
+allegro_hand_dof_force:
+  shape: 16  # Allegro hand has 16 DOF
+  attr: allegro_hand_dof_forces
+  tags: ["force"]
 
 ##################################################
 # Fingers
@@ -60,8 +64,22 @@ object_position:
   attr: object_root_positions
 
 object_orientation:
-  shape: 6
+  shape: 4 # 6
   attr: object_root_orientations
+  tags: ["orientation"]
+
+goal_position:
+  shape: 3
+  attr: goal_pos
+
+goal_orientation:
+  shape: 4 # 6
+  attr: goal_rot
+  tags: ["orientation"]
+
+goal_orientation_dist:
+  shape: 4 # 6
+  attr: goal_ori_dist
   tags: ["orientation"]
 
 object_linear_velocity:
@@ -80,10 +98,6 @@ object_orientation_wrt_palm:
   shape: 6
   attr: object_orientations_wrt_palm
   tags: ["orientation"]
-
-object_position_wrt_keypoint:
-  shape: [num_keypoints, 3]
-  attr: object_positions_wrt_keypoints
 
 ##################################################
 # Pointclouds
