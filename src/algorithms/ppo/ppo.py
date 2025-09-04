@@ -26,7 +26,7 @@ from torch.utils.data import DataLoader, Dataset, TensorDataset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from algorithms.ppo.storage import RolloutStorage
+from algorithms.ppo.storage import RolloutStorage, RolloutStorageDual
 from algorithms.ppo.utils import AverageScalarMeter, RunningMeanStd
 
 # from algorithms.SDE import init_sde
@@ -120,6 +120,14 @@ class PPO:
         self.action_clip = self.cfg_train["setting"]["action_clip"]
         self.grad_process = self.cfg_train["setting"]["grad_process"]
 
+        self.critic_mode = self.model_cfg.get("critic_mode", "single")
+        # assert self.critic_mode == "single"
+        self.critic_weights = torch.tensor(self.model_cfg.get("critics_weights", [1.0, 1.0]), device=self.device).float().view(1, 1, -1)
+        self.int_gamma = self.model_cfg.get("int_gamma", self.gamma)
+        self.int_lam = self.model_cfg.get("int_lam", self.lam)
+        self.int_non_episodic_flags = self.model_cfg.get("int_non_episodic_flags", True)
+        self.model_cfg["critic_mode"] = self.critic_mode
+
         if self.action_type == "joint":
             if self.sub_action_type == "add+jointscale":
                 action_space_shape = (vec_env.num_actions * 2,)
@@ -193,15 +201,28 @@ class PPO:
                             param.requires_grad = False
 
         self.actor_critic.to(self.device)
-        self.storage = RolloutStorage(
-            self.vec_env.num_envs,
-            self.num_transitions_per_env,
-            observation_space_shape,
-            self.state_space.shape,
-            action_space_shape,
-            self.device,
-            sampler,
-        )
+        if self.critic_mode == "dual":
+            self.storage = RolloutStorageDual(
+                self.vec_env.num_envs,
+                self.num_transitions_per_env,
+                observation_space_shape,
+                self.state_space.shape,
+                action_space_shape,
+                num_critics=2,
+                reward_group_weights=self.critic_weights.squeeze().tolist(),
+                device=self.device,
+                sampler=sampler,
+            )
+        else:
+            self.storage = RolloutStorage(
+                self.vec_env.num_envs,
+                self.num_transitions_per_env,
+                observation_space_shape,
+                self.state_space.shape,
+                action_space_shape,
+                self.device,
+                sampler,
+            )
 
         self.obs_running_mean_std = RunningMeanStd(observation_space_shape).to(
             self.device
@@ -801,11 +822,25 @@ class PPO:
                 self.actor_critic.update_normalization(next_obs["obs"])
 
                 rewards = rews.unsqueeze(-1)
+                if self.critic_mode == "dual":
+                    cur = infos["curiosity_reward"].to(self.device).view(-1)
+                    rew_e = rews - cur
+                    rew_i = cur
+                    rewards = torch.stack([rew_e, rew_i], dim=-1)  # (N, 2)
+                    # print(f"rew_e: {rew_e.mean()}, rew_i: {rew_i.mean()}")
+                else:
+                    rewards = rews.unsqueeze(-1)
 
                 # Record the transition
-                self.storage.add_transitions(
-                    storage_obs, current_states, actions, rews, dones, values, actions_log_prob, mu, sigma
-                )
+                if self.critic_mode == "dual":
+                    self.storage.add_transitions(
+                        storage_obs, current_states, actions, rewards, dones, values, actions_log_prob, mu, sigma
+                    )
+                else:
+                    self.storage.add_transitions(
+                        storage_obs, current_states, actions, rews, dones, values, actions_log_prob, mu, sigma
+                    )
+                    
                 current_obs.copy_(next_obs["obs"])
                 current_states.copy_(next_states)
 
@@ -813,7 +848,7 @@ class PPO:
                 ep_infos.append(infos.copy())
 
                 if self.print_log:
-                    cur_reward_sum[:] += rewards
+                    cur_reward_sum[:] += rewards if not self.critic_mode == "dual" else rewards[:, :1]
                     cur_episode_length[:] += 1
                     done_indices = (dones > 0).nonzero(as_tuple=False)
                     not_dones = 1.0 - dones.float()
@@ -843,7 +878,14 @@ class PPO:
 
             # Learning step
             start = stop
-            self.storage.compute_returns(last_values, self.gamma, self.lam)
+            # self.storage.compute_returns(last_values, self.gamma, self.lam) # original
+            if self.critic_mode == "dual":
+                gammas = torch.tensor([self.gamma, self.int_gamma], device=self.device, dtype=torch.float32)
+                lams = torch.tensor([self.lam, self.int_lam], device=self.device, dtype=torch.float32)
+                episodic_flags = torch.tensor([1, 0 if self.int_non_episodic_flags else 1], device=self.device, dtype=torch.float32)
+                self.storage.compute_returns_multi(last_values, gammas, lams, episodic_flags)
+            else:
+                self.storage.compute_returns(last_values, self.gamma, self.lam)
 
             mean_value_loss, mean_surrogate_loss, mean_kl_loss = self.update()
             self.storage.clear()
@@ -970,8 +1012,18 @@ class PPO:
                 actions_batch = self.storage.actions.view(-1, self.storage.actions.size(-1))[indices]
                 target_values_batch = self.storage.values.view(-1, 1)[indices]
                 returns_batch = self.storage.returns.view(-1, 1)[indices]
+                if self.critic_mode == "dual":
+                    target_values_batch = self.storage.values.view(-1, 2)[indices]
+                    returns_batch = self.storage.returns.view(-1, 2)[indices]
+                else:
+                    target_values_batch = self.storage.values.view(-1, 1)[indices]
+                    returns_batch = self.storage.returns.view(-1, 1)[indices]
                 old_actions_log_prob_batch = self.storage.actions_log_prob.view(-1, 1)[indices]
                 advantages_batch = self.storage.advantages.view(-1, 1)[indices]
+                if self.critic_mode == "dual":
+                    advantages_batch = self.storage.combined_advantages.view(-1, 1)[indices]
+                else:
+                    advantages_batch = self.storage.advantages.view(-1, 1)[indices]
                 old_mu_batch = self.storage.mu.view(-1, self.storage.actions.size(-1))[indices]
                 old_sigma_batch = self.storage.sigma.view(-1, self.storage.actions.size(-1))[indices]
 

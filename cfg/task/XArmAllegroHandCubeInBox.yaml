@@ -181,10 +181,10 @@ env:
 
   # container + cube
   containerInnerWidth: 0.085         # X (meters)
-  containerInnerDepth: 0.10         # Y (meters)
+  containerInnerDepth: 0.080         # Y (meters)
   containerHeight: 0.16             # Z (meters)
-  containerWallThickness: 0.015
-  containerFloorThickness: 0.01
+  containerWallThickness: 0.008
+  containerFloorThickness: 0.008
   cubeHeight: 0.16
   cubeWidth: 0.08
   cubeLength: 0.05

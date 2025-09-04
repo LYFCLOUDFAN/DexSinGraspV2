@@ -1,3 +1,4 @@
+from ipaddress import v4_int_to_packed
 from typing import Optional
 
 import numpy as np
@@ -150,6 +151,8 @@ class ActorCritic(nn.Module):
         # state encoder
         critic_state_encoder_hid_sizes = model_cfg["vf_state_encoder_hid_sizes"]
         critic_hidden_dim = critic_state_encoder_hid_sizes[-1]
+        self.critic_mode = model_cfg.get("critic_mode", "single")
+        self.num_critics = 2 if self.critic_mode == "dual" else 1
         self.critic_state_enc = self.build_block(
             self.state_dim, critic_hidden_dim, activation, critic_state_encoder_hid_sizes
         )
@@ -179,7 +182,12 @@ class ActorCritic(nn.Module):
             )
 
         # mlp output
-        self.critic_output = self.build_block(critic_hidden_dim, 1, activation, [], activate_for_last_layer=False)
+        if self.critic_mode == "dual":
+            self.critic_output_ext = self.build_block(critic_hidden_dim, 1, activation, [], activate_for_last_layer=False)
+            self.critic_output_int = self.build_block(critic_hidden_dim, 1, activation, [], activate_for_last_layer=False)
+        else:
+            self.critic_output = self.build_block(critic_hidden_dim, 1, activation, [], activate_for_last_layer=False)
+
         
         # Critic observation normalization
         self.critic_obs_normalization = critic_obs_normalization
@@ -258,9 +266,17 @@ class ActorCritic(nn.Module):
         if actor_output_linear:
             torch.nn.init.orthogonal_(actor_output_linear[-1].weight, gain=0.01)  # type: ignore
 
-        critic_output_linear = [m for m in self.critic_output if isinstance(m, nn.Linear)]
-        if critic_output_linear:
-            torch.nn.init.orthogonal_(critic_output_linear[-1].weight, gain=1.0)  # type: ignore
+        if self.critic_mode == "dual":
+            lin_e = [m for m in self.critic_output_ext if isinstance(m, nn.Linear)]
+            lin_i = [m for m in self.critic_output_int if isinstance(m, nn.Linear)]
+            if lin_e:
+                torch.nn.init.orthogonal_(lin_e[-1].weight, gain=1.0)  # type: ignore
+            if lin_i:
+                torch.nn.init.orthogonal_(lin_i[-1].weight, gain=1.0)  # type: ignore
+        else:
+            critic_output_linear = [m for m in self.critic_output if isinstance(m, nn.Linear)]
+            if critic_output_linear:
+                torch.nn.init.orthogonal_(critic_output_linear[-1].weight, gain=1.0)  # type: ignore
 
         # Additional critic for ILAD
         if hasattr(self, 'additional_critic_mlp1'):
@@ -390,9 +406,13 @@ class ActorCritic(nn.Module):
         if self.total_feat_num > 1:
             x = self.critic_fuse(x)
 
-        # output
-        x = self.critic_output(x)
-        return x
+        if self.critic_mode == "dual":
+            v_ext = self.critic_output_ext(x)
+            v_int = self.critic_output_int(x)
+            return torch.cat([v_ext, v_int], -1) # ext, int
+        else:
+            x = self.critic_output(x)
+            return x
 
     def forward_additional_critic(self, observations, actions):
         """Process observation."""
