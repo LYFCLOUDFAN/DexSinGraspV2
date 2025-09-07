@@ -86,7 +86,7 @@ env:
   enableCuriosity: True
   curiosity:
     mechanism: "fibonacci"
-    num_fib_points: 64
+    num_fib_points: 128
     per_finger: True
     num_fingers: 4
     obs_dim: 24 # 48 * 2 / 134 = 2 * 67
@@ -181,7 +181,7 @@ env:
 
   # container + cube
   containerInnerWidth: 0.085         # X (meters)
-  containerInnerDepth: 0.080         # Y (meters)
+  containerInnerDepth: 0.090         # Y (meters)
   containerHeight: 0.16             # Z (meters)
   containerWallThickness: 0.008
   containerFloorThickness: 0.008

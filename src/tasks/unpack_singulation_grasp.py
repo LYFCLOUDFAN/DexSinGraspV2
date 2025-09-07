@@ -80,8 +80,8 @@ class XArmAllegroHandCubeInBox(XArmAllegroHandFunctionalManipulationUnderarm):
         for a in [floor_asset, wall_y_asset, wall_x_asset]:
             rprops = self.gym.get_asset_rigid_shape_properties(a)
             for s in rprops:
-                s.friction = 0.05
-                s.restitution = 0.05
+                s.friction = 0.01
+                s.restitution = 0.01
             self.gym.set_asset_rigid_shape_properties(a, rprops)
 
         # Store container assets (we'll place them per-env in _create_envs)
@@ -138,7 +138,7 @@ class XArmAllegroHandCubeInBox(XArmAllegroHandFunctionalManipulationUnderarm):
         config["warehouse"] = {"targ_obj": [], "surr_obj": []}
 
         target_asset_options = gymapi.AssetOptions()
-        target_asset_options.density = 2000.0
+        target_asset_options.density = 500.0
         target_asset_options.convex_decomposition_from_submeshes = True
         target_asset_options.override_com = True
         target_asset_options.override_inertia = True

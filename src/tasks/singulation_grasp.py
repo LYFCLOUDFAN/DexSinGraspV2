@@ -2128,7 +2128,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         # set rigid-shape properties for allegro-hand
         rigid_shape_props = self.gym.get_asset_rigid_shape_properties(asset)
         for shape in rigid_shape_props:
-            shape.friction = 3.0
+            shape.friction = 0.8
         self.gym.set_asset_rigid_shape_properties(asset, rigid_shape_props)
 
         for i in range(num_dofs):
@@ -3088,7 +3088,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         contact_mag = self.fingertip_contact_forces.norm(dim=-1, p=2)
 
         # Contact filters
-        near_surface = (r.squeeze(-1) < 0.005)           # (N,4)
+        near_surface = (r.squeeze(-1) < 0.002)           # (N,4)
         has_force = (contact_mag > 0.5)                 # (N,4)
         contact_mask = near_surface & has_force         # (N,4)
 

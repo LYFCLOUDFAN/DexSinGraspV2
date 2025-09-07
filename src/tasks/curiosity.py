@@ -238,7 +238,7 @@ class FibonacciCuriosity:
             self.bin_cnt += binc
             per_contact_counts[:] = self.bin_cnt[idx]
 
-        alpha, beta = 1.0, 1.0
+        alpha, beta = 4.0, 4.0
         per_contact_rew = alpha / torch.sqrt(1.0 + beta * per_contact_counts.float())  # (M,)
 
         rewards_matrix = torch.zeros(N * F, device=self.device)
