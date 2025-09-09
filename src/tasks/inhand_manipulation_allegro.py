@@ -617,115 +617,17 @@ class InhandManipulationAllegro(AllegroHand):
             
         asset_filename = self.cfg["env"]["asset"].get("assetFileName")
 
-        asset = self.gym.load_asset(self.sim, self._asset_root, asset_filename, asset_options)
+        allegro_hand_asset = self.gym.load_asset(self.sim, self._asset_root, asset_filename, asset_options)
         if self.env_info_logging:
-            print_links_and_dofs(self.gym, asset, asset_name)
+            print_links_and_dofs(self.gym, allegro_hand_asset, asset_name)
 
-        config["num_rigid_bodies"] = self.gym.get_asset_rigid_body_count(asset)
-        config["num_rigid_shapes"] = self.gym.get_asset_rigid_shape_count(asset)
-        config["num_dofs"] = self.gym.get_asset_dof_count(asset)
-        config["num_actuators"] = self.gym.get_asset_actuator_count(asset)
-        config["num_tendons"] = self.gym.get_asset_tendon_count(asset)
+        config["num_rigid_bodies"] = self.gym.get_asset_rigid_body_count(allegro_hand_asset)
+        config["num_rigid_shapes"] = self.gym.get_asset_rigid_shape_count(allegro_hand_asset)
+        config["num_dofs"] = self.gym.get_asset_dof_count(allegro_hand_asset)
+        config["num_actuators"] = self.gym.get_asset_actuator_count(allegro_hand_asset)
+        config["num_tendons"] = self.gym.get_asset_tendon_count(allegro_hand_asset)
 
         num_dofs = config["num_dofs"]
-
-        dof_props = self.gym.get_asset_dof_properties(asset)
-        hand_dof_idx = 0
-
-        # set rigid-shape properties for allegro-hand
-        rigid_shape_props = self.gym.get_asset_rigid_shape_properties(asset)
-        for shape in rigid_shape_props:
-            shape.friction = 3.0
-        self.gym.set_asset_rigid_shape_properties(asset, rigid_shape_props)
-
-        for i in range(num_dofs):
-            name = self.gym.get_asset_dof_name(asset, i)
-            dof_props["driveMode"][i] = gymapi.DOF_MODE_POS
-            if name.endswith(".0"):
-                dof_props["stiffness"][i] = 30
-                dof_props["damping"][i] = 1
-                dof_props["velocity"][i] = 3.0
-                dof_props["effort"][i] = 5
-                hand_dof_idx += 1
-            else:
-                dof_props["stiffness"][i] = 4000
-                dof_props["damping"][i] = 80
-                # dof_props["stiffness"][i] = 1e6
-                # dof_props["damping"][i] = 1e2
-
-        if self.env_info_logging:
-            print_dof_properties(self.gym, asset, dof_props, asset_name)
-
-        dof_lower_limits = [dof_props["lower"][i] for i in range(num_dofs)]
-        dof_upper_limits = [dof_props["upper"][i] for i in range(num_dofs)]
-        dof_init_positions = [0.0 for _ in range(num_dofs)]
-        dof_init_velocities = [0.0 for _ in range(num_dofs)]
-
-        config["limits"] = {}
-        config["limits"]["lower"] = torch.tensor(dof_lower_limits).float().to(self.device)
-        config["limits"]["upper"] = torch.tensor(dof_upper_limits).float().to(self.device)
-
-        config["init"] = {}
-        config["init"]["position"] = torch.tensor(dof_init_positions).float().to(self.device)
-        config["init"]["velocity"] = torch.tensor(dof_init_velocities).float().to(self.device)
-        
-        # fmt: off
-        close_dof_names = [
-            "joint_2.0", "joint_3.0",  # finger 0 (index)
-            "joint_6.0", "joint_7.0",  # finger 1 (middle)
-            "joint_10.0", "joint_11.0",  # finger 2 (ring)
-            "joint_14.0", "joint_15.0",  # thumb
-        ]
-        # fmt: on
-
-        self.close_dof_indices = torch.tensor(
-            [self.gym.find_asset_dof_index(asset, name) for name in close_dof_names],
-            dtype=torch.long,
-            device=self.device,
-        )
-
-        self.allegro_center_index = self.gym.find_asset_rigid_body_index(asset, self._allegro_hand_center_prim)
-        self.keypoint_indices = [self.gym.find_asset_rigid_body_index(asset, prim) for prim in self._keypoints]
-        self.fingertip_indices = [self.gym.find_asset_rigid_body_index(asset, prim) for prim in self._fingertips]
-        self.keypoint_offset = [self._keypoints_info[link_name] for link_name in self._keypoints] # (#key_link, 1, 3)
-
-        config["asset"] = asset
-        config["dof_props"] = dof_props
-
-        print(">>> xArm6 + Allegro Hand loaded")
-        return config
-    
-    def _create_envs(self, num_envs, spacing, num_per_row):
-        # super()._create_envs(num_envs, spacing, num_per_row)
-        
-        # =========================================================== AllegroHand Task _create_envs() ===================================================
-        # directly calling parent class's _create_envs() will make wrong number of rigid bodies
-        lower = gymapi.Vec3(-spacing, -spacing, 0.0)
-        upper = gymapi.Vec3(spacing, spacing, spacing)
-
-        asset_root = self._asset_root
-        allegro_hand_asset_file = "urdf/kuka_allegro_description/allegro.urdf"
-
-        if "asset" in self.cfg["env"]:
-            asset_root = self.cfg["env"]["asset"].get("assetRoot", asset_root)
-            allegro_hand_asset_file = self.cfg["env"]["asset"].get("assetFileName", allegro_hand_asset_file)
-
-        object_asset_file = self.asset_files_dict[self.object_type]
-
-        # load shadow hand_ asset
-        asset_options = gymapi.AssetOptions()
-        asset_options.flip_visual_attachments = False
-        asset_options.fix_base_link = True
-        asset_options.collapse_fixed_joints = False
-        asset_options.disable_gravity = True
-        asset_options.thickness = 0.001
-        asset_options.angular_damping = 0.01
-
-        if self.physics_engine == gymapi.SIM_PHYSX:
-            asset_options.use_physx_armature = True
-        asset_options.default_dof_drive_mode = gymapi.DOF_MODE_POS
-
-        allegro_hand_asset = self.gym.load_asset(self.sim, asset_root, allegro_hand_asset_file, asset_options)
 
         self.num_shadow_hand_bodies = self.gym.get_asset_rigid_body_count(allegro_hand_asset)
         self.num_shadow_hand_shapes = self.gym.get_asset_rigid_shape_count(allegro_hand_asset)
@@ -764,6 +666,93 @@ class InhandManipulationAllegro(AllegroHand):
         self.shadow_hand_dof_default_pos = to_torch(self.shadow_hand_dof_default_pos, device=self.device)
         self.shadow_hand_dof_default_vel = to_torch(self.shadow_hand_dof_default_vel, device=self.device)
 
+        # hand_dof_idx = 0
+
+        # # set rigid-shape properties for allegro-hand
+        # rigid_shape_props = self.gym.get_asset_rigid_shape_properties(allegro_hand_asset)
+        # for shape in rigid_shape_props:
+        #     print("shape.friction:", shape.friction)
+        #     shape.friction = 0.8
+        
+        # self.gym.set_asset_rigid_shape_properties(allegro_hand_asset, rigid_shape_props)
+        
+        # for i in range(num_dofs):
+        #     name = self.gym.get_asset_dof_name(allegro_hand_asset, i)
+        #     shadow_hand_dof_props["driveMode"][i] = gymapi.DOF_MODE_POS
+        #     if name.endswith(".0"):
+        #         dof_props["stiffness"][i] = 30
+        #         dof_props["damping"][i] = 1
+        #         dof_props["velocity"][i] = 3.0
+        #         dof_props["effort"][i] = 5
+        #         hand_dof_idx += 1
+        #     else:
+        #         dof_props["stiffness"][i] = 4000
+        #         dof_props["damping"][i] = 80
+        #         # dof_props["stiffness"][i] = 1e6
+        #         # dof_props["damping"][i] = 1e2
+
+        if self.env_info_logging:
+            print_dof_properties(self.gym, allegro_hand_asset, shadow_hand_dof_props, asset_name)
+
+        dof_lower_limits = [shadow_hand_dof_props["lower"][i] for i in range(num_dofs)]
+        dof_upper_limits = [shadow_hand_dof_props["upper"][i] for i in range(num_dofs)]
+        dof_init_positions = [0.0 for _ in range(num_dofs)]
+        dof_init_velocities = [0.0 for _ in range(num_dofs)]
+
+        config["limits"] = {}
+        config["limits"]["lower"] = torch.tensor(dof_lower_limits).float().to(self.device)
+        config["limits"]["upper"] = torch.tensor(dof_upper_limits).float().to(self.device)
+
+        config["init"] = {}
+        config["init"]["position"] = torch.tensor(dof_init_positions).float().to(self.device)
+        config["init"]["velocity"] = torch.tensor(dof_init_velocities).float().to(self.device)
+        
+        # fmt: off
+        close_dof_names = [
+            "joint_2.0", "joint_3.0",  # finger 0 (index)
+            "joint_6.0", "joint_7.0",  # finger 1 (middle)
+            "joint_10.0", "joint_11.0",  # finger 2 (ring)
+            "joint_14.0", "joint_15.0",  # thumb
+        ]
+        # fmt: on
+
+        self.close_dof_indices = torch.tensor(
+            [self.gym.find_asset_dof_index(allegro_hand_asset, name) for name in close_dof_names],
+            dtype=torch.long,
+            device=self.device,
+        )
+
+        self.allegro_center_index = self.gym.find_asset_rigid_body_index(allegro_hand_asset, self._allegro_hand_center_prim)
+        self.keypoint_indices = [self.gym.find_asset_rigid_body_index(allegro_hand_asset, prim) for prim in self._keypoints]
+        self.fingertip_indices = [self.gym.find_asset_rigid_body_index(allegro_hand_asset, prim) for prim in self._fingertips]
+        self.keypoint_offset = [self._keypoints_info[link_name] for link_name in self._keypoints] # (#key_link, 1, 3)
+
+        config["asset"] = allegro_hand_asset
+        config["dof_props"] = shadow_hand_dof_props
+
+        print(">>> Allegro Hand loaded")
+        return config
+    
+    def _create_envs(self, num_envs, spacing, num_per_row):
+        print(">>> Setting up %d environments" % num_envs)
+        num_per_row = int(np.sqrt(num_envs))
+
+        # super()._create_envs(num_envs, spacing, num_per_row)
+        
+        # =========================================================== AllegroHand Task _create_envs() ===================================================
+        # directly calling parent class's _create_envs() will make wrong number of rigid bodies
+        lower = gymapi.Vec3(-spacing, -spacing, 0.0)
+        upper = gymapi.Vec3(spacing, spacing, spacing)
+
+        print(">>> Defining gym assets")
+        
+        asset_root = self._asset_root
+        object_asset_file = self.asset_files_dict[self.object_type]
+
+        self.gym_assets["current"]["robot"] = self.__define_allegro_hand()
+        allegro_hand_asset = self.gym_assets["current"]["robot"]["asset"]
+        shadow_hand_dof_props = self.gym_assets["current"]["robot"]["dof_props"]
+        
         # load manipulated object and goal assets
         object_asset_options = gymapi.AssetOptions()
         object_asset = self.gym.load_asset(self.sim, asset_root, object_asset_file, object_asset_options)
@@ -874,14 +863,6 @@ class InhandManipulationAllegro(AllegroHand):
         
         # ===================================================== Allegro Hand _create_envs END =====================================================
         
-        print(">>> Setting up %d environments" % num_envs)
-        num_per_row = int(np.sqrt(num_envs))
-
-        print(">>> Defining gym assets")
-
-        # actor has already been defined in parent class, here we just accomplish the gym_assets dict
-        self.gym_assets["current"]["robot"] = self.__define_allegro_hand()
-        
         env = self.envs[-1] # it seems we can use the last env to get indices
         
         allegro_hand = self.gym.find_actor_handle(env, "hand")
@@ -959,9 +940,11 @@ class InhandManipulationAllegro(AllegroHand):
 
 
         contact_mag = self.keypoint_contact_forces.norm(dim=-1, p=2)
+        # print("contact_mag", contact_mag[0])
 
         # Contact filters
-        near_surface = (r.squeeze(-1) < 0.005)           # (N,4)
+        near_surface = (r.squeeze(-1) < 0.01)           # (N,4)
+        # print("near_surface", near_surface[0])
         has_force = (contact_mag > 0.5)                 # (N,4)
         contact_mask = near_surface & has_force         # (N,4)
 
@@ -988,6 +971,7 @@ class InhandManipulationAllegro(AllegroHand):
         """Compute the curiosity reward."""
         
         curiosity_obs, nearest_contact = self.compute_curiosity_observations()  
+        # print("curiosity_obs", curiosity_obs[0])
         exploration_mask = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
         exploration_bonus = torch.zeros(self.num_envs, device=self.device)
         if exploration_mask.any():
@@ -996,6 +980,7 @@ class InhandManipulationAllegro(AllegroHand):
                 masked_obs, self.curiosity_reward_scale
             )
             exploration_bonus[exploration_mask] = masked_bonus * 40
+            # print("curiosity_reward", exploration_bonus[0])
             
         self.extras["curiosity_reward"] = exploration_bonus.clone()
         self.extras["exploration_rate"] = exploration_mask.float().clone()
@@ -1065,6 +1050,12 @@ class InhandManipulationAllegro(AllegroHand):
 
     def eval(self, vis=False):
         self.training = False        
+
+        
+#####################################################################
+###=========================jit functions=========================###
+#####################################################################
+                
                 
 @torch.jit.script
 def compute_hand_reward(
