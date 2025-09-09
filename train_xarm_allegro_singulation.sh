@@ -4,7 +4,7 @@
 # This script runs PPO training for the singulation and grasp task
 
 python src/train.py \
-    headless=True \
+    headless=False \
     env_mode=pgm \
     env_info=True \
     num_envs=2048 \
