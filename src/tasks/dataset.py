@@ -379,7 +379,8 @@ class ObjectDataset(FunctionalGraspingDataset):
         "block": {
             "object_type": "mesh_file",
             "file_path": "/home/nus/IsaacGymEnvs/assets/urdf/objects/meshes/cube_multicolor.obj",
-            "scale": [0.05, 0.05, 0.05],   # per-axis scale
+            # "scale": [0.05, 0.05, 0.05],   # per-axis scale
+            "scale": [0.065, 0.065, 0.065],   # per-axis scale
         },
         "egg": {
             "object_type": "predefined_geometry",
@@ -389,7 +390,7 @@ class ObjectDataset(FunctionalGraspingDataset):
         "pen": {
             "object_type": "predefined_geometry",
             "geometry_type": "capsule",
-            "size": [0.008, 0.1],          # [radius, length]  (length为中部圆柱段长度)
+            "size": [0.008, 0.2],          # [radius, length]  (length为中部圆柱段长度)
         },
     }
 

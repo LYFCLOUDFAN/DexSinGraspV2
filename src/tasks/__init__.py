@@ -11,12 +11,20 @@ from .functional_manipulation_underarm import ShadowHandFunctionalManipulationUn
 from .singulation_grasp import XArmAllegroHandFunctionalManipulationUnderarm
 from .singulation_grasp_w_fingertip import FloatingFingertipManipulation
 from .inhand_manipulation_allegro import InhandManipulationAllegro
+from .inhand_manipulation_shadow import InhandManipulationShadow
+from .inhand_manipulation_shadow_spin import InhandManipulationShadowSpin
+from .inhand_manipulation_shadow_spin_upside_down import InhandManipulationShadowSpinUpsideDown
+
 
 # isaacgym_task_map["ShadowHandFunctionalManipulation"] = ShadowHandFunctionalManipulation
 isaacgym_task_map["ShadowHandFunctionalManipulationUnderarm"] = ShadowHandFunctionalManipulationUnderarm
 isaacgym_task_map["XArmAllegroHandFunctionalManipulationUnderarm"] = XArmAllegroHandFunctionalManipulationUnderarm
 isaacgym_task_map["FloatingFingertipManipulation"] = FloatingFingertipManipulation
 isaacgym_task_map["InhandManipulationAllegro"] = InhandManipulationAllegro
+isaacgym_task_map["InhandManipulationShadow"] = InhandManipulationShadow
+isaacgym_task_map["InhandManipulationShadowSpin"] = InhandManipulationShadowSpin
+isaacgym_task_map["InhandManipulationShadowSpinUpsideDown"] = InhandManipulationShadowSpinUpsideDown
+
 # isaacgym_task_map["ShadowHand"] = ShadowHand
 
 

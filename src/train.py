@@ -219,6 +219,81 @@ if __name__ == "__main__":
                     "action",
                 ]
                 action_space = ["hand_rotation"]
+            elif "task=InhandManipulationShadow" in args.overrides:
+                obs_space = [
+                    # Hand state
+                    "shadow_hand_dof_position",
+                    "shadow_hand_dof_velocity",
+                    "shadow_hand_dof_force",
+                    # Fingertip information for contact detection
+                    # "fingertip_position_wrt_palm",
+                    # "fingertip_orientation_wrt_palm",
+                    # "fingertip_linear_velocity",
+                    # "fingertip_angular_velocity",
+                    # Object state (current target object)
+                    # "object_position_wrt_palm",
+                    # "object_orientation_wrt_palm",
+                    "goal_position",
+                    "goal_orientation",
+                    "goal_orientation_dist",
+                    "object_position",
+                    "object_orientation",
+                    "object_linear_velocity",
+                    "object_angular_velocity",
+                    # Action
+                    "action",
+                ]
+                action_space = ["hand_rotation"]
+            elif "task=InhandManipulationShadowSpin" in args.overrides:
+                obs_space = [
+                    # Hand state
+                    "shadow_hand_dof_position",
+                    "shadow_hand_dof_velocity",
+                    "shadow_hand_dof_force",
+                    # Fingertip information for contact detection
+                    # "fingertip_position_wrt_palm",
+                    # "fingertip_orientation_wrt_palm",
+                    # "fingertip_linear_velocity",
+                    # "fingertip_angular_velocity",
+                    # Object state (current target object)
+                    # "object_position_wrt_palm",
+                    # "object_orientation_wrt_palm",
+                    "goal_position",
+                    "goal_orientation",
+                    "goal_orientation_dist",
+                    "object_position",
+                    "object_orientation",
+                    "object_linear_velocity",
+                    "object_angular_velocity",
+                    # Action
+                    "action",
+                ]
+                action_space = ["hand_rotation"]
+            elif "task=InhandManipulationShadowSpinUpsideDown" in args.overrides:
+                obs_space = [
+                    # Hand state
+                    "shadow_hand_dof_position",
+                    "shadow_hand_dof_velocity",
+                    "shadow_hand_dof_force",
+                    # Fingertip information for contact detection
+                    # "fingertip_position_wrt_palm",
+                    # "fingertip_orientation_wrt_palm",
+                    # "fingertip_linear_velocity",
+                    # "fingertip_angular_velocity",
+                    # Object state (current target object)
+                    # "object_position_wrt_palm",
+                    # "object_orientation_wrt_palm",
+                    "goal_position",
+                    "goal_orientation",
+                    "goal_orientation_dist",
+                    "object_position",
+                    "object_orientation",
+                    "object_linear_velocity",
+                    "object_angular_velocity",
+                    # Action
+                    "action",
+                ]
+                action_space = ["hand_rotation"]
             else:
                 # Default Shadow Hand configuration
                 obs_space = [
