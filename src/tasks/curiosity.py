@@ -91,10 +91,11 @@ class NeuralHashCuriosity:
             self.obs_lb = torch.zeros(1, cfg["obs_dim"], device=device)
             self.obs_ub = torch.ones(1, cfg["obs_dim"], device=device)
 
+        bound_dim = int(cfg["obs_dim"] / 2)
         self.obs_lb = torch.tensor([[
-            -0.15] * 36], device=device)
+            -0.15] * bound_dim], device=device)
         self.obs_ub = torch.tensor([[ 
-            0.15] * 36], device=device)
+            0.15] * bound_dim], device=device)
     def bin2int(self, bins):
         base_ = 2 ** torch.arange(end=self.cfg["pred_dim"], device=self.device).unsqueeze(0)
         ints = torch.sum(bins * base_, dim=-1)
