@@ -43,6 +43,7 @@ from .isaacgym_utils import (
 )
 from .torch_utils import *
 from .curiosity import NeuralHashCuriosity
+from .curiosity_reward_manager import CuriosityRewardManager
 # for debug
 test_ik = False
 test_sim = False
@@ -900,7 +901,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             self._load_precomputed_poses()
         
         # pre pose sampling
-        self.use_pre_poses_init = self.cfg["env"].get("usePrePosesInit", False) and (not self.random_init_around_object)
+        self.use_pre_poses_init = self.cfg["env"].get("usePrePosesInit", True) and (not self.random_init_around_object)
         self.pre_poses_file = self.cfg["env"].get("prePosesFile", "data/pre_pose_arm_poses.pt")
         self.pre_poses_z_offset = self.cfg["env"].get("prePosesTransOffset", 0.02)
         self.pre_poses_bank = None
@@ -934,7 +935,14 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             self._expl_dims = (nx, ny, nz)
             # counts per fingertip: 4 fingertips × voxel grid
             self.exploration_counts = torch.zeros(4, nx, ny, nz, dtype=torch.int32, device=self.device)
-            
+        
+        
+        
+        self.reach_curiosity_mgr = CuriosityRewardManager(
+            num_keypoints=self._dims.NUM_FINGERTIPS.value,
+            device=self.device,
+            k=16, temp=0.02, w_curv=0.5, w_align=0.5, contact_bonus=0.0, per_contact=False
+        )
         
         self.obj_max_length = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         if "gf" in self.observation_info:
@@ -3552,6 +3560,31 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         )
         self.extras["fingertips_to_obj_dist_min"] = self.fingertips_to_obj_dist_min.clone()
         
+    def compute_curiosity_informed_reach_reward(self):
+        """Compute reach reward - curiosity-informed version using fingertip positions.
+        """
+        
+        obj_pc = self._get_target_surface_points_world()     # (N, M, 3)
+        kp_pos = self.fingertip_positions                    # (N, L=4, 3)
+
+        filtered_rel, _ = self.compute_contact_filtered_fingertips_relative_pos()  # (N,4,3), (N,)
+        contact_mask = (filtered_rel.abs().sum(dim=-1) > 0)  # (N,4) bool
+
+        d = torch.cdist(kp_pos, obj_pc, p=2)                 # (N,4,M)
+        contact_indices = d.argmin(dim=-1)                   # (N,4) in [0..M-1]
+
+        reward, info = self.reach_curiosity_mgr.compute_reward(
+            tau=0.002,
+            object_pointclouds=obj_pc,
+            keypoint_positions=kp_pos,
+            contact_indices=contact_indices,
+            contact_mask=contact_mask,
+        )
+        
+        self.reach_curiosity_rew = reward
+        self.reach_curiosity_rew_scaled = self.reach_curiosity_rew * 1
+        self.extras["reach_curiosity_rew"] = self.reach_curiosity_rew_scaled.clone()
+
     def compute_pre_grasp_reward(self):
         """Compute pre-grasp reward - reward for reaching the target object."""
         # max(d_closest - d, 0) d is between mean position for fingertips and target object
@@ -4047,6 +4080,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         # self.compute_reach_reward_deprecated()
         # self.compute_reach_reward_each_fingertip(); self.reach_rew_scaled = self.reach_rew_each_fingertip_scaled
         self.compute_reach_reward_keypoints(); self.reach_rew_scaled = self.reach_rew_scaled_keypoints.clone()
+        self.compute_curiosity_informed_reach_reward()
         # self.compute_pre_grasp_reward()
         self.compute_pick_reward()
         self.compute_targ_reward()
