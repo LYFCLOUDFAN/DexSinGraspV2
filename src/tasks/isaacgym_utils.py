@@ -3,6 +3,7 @@ from typing import Dict, Optional, Sequence, Tuple, Union
 import cv2
 import numpy as np
 import torch
+import torch.nn.functional as F
 from isaacgym import gymapi
 from isaacgym.torch_utils import quat_apply, quat_conjugate, quat_mul
 from torch import Tensor
@@ -249,11 +250,11 @@ def draw_points(
     positions = positions.reshape(num_envs, num_points, 3)
 
     from isaacgym import gymutil
-    positions_ = positions.reshape(num_envs, -1)
     for i in range(num_envs):
-        sphere_geom_marker = gymutil.WireframeSphereGeometry(radius, num_segments, num_segments, None, color=color)
-        sphere_pose = gymapi.Transform(gymapi.Vec3(positions_[i, 0], positions_[i, 1], positions_[i, 2]), r=None)
-        gymutil.draw_lines(sphere_geom_marker, gym, viewer, envs[i], sphere_pose)
+        for p in range(num_points):
+            sphere_geom_marker = gymutil.WireframeSphereGeometry(radius, num_segments, num_segments, None, color=color)
+            sphere_pose = gymapi.Transform(gymapi.Vec3(positions[i, p, 0], positions[i, p, 1], positions[i, p, 2]), r=None)
+            gymutil.draw_lines(sphere_geom_marker, gym, viewer, envs[i], sphere_pose)
 
 def draw_boxes(
     gym: gymapi.Gym,
