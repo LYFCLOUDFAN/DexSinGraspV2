@@ -1,115 +1,94 @@
 import torch
 from typing import Optional, Dict, Tuple
 
+
 class CuriosityRewardManager:
-    """
-    - Maintains a global (cross-environment) contact count heatmap, either per-point or per-cluster.
-    - Core reward: for each fingertip, compute the novelty-weighted average distance within a local reachable neighborhood to the object point cloud; use the forward difference (previous - current) as progress reward.
-    - Reachability constraint: only points within reachability_threshold are considered to keep exploration local and along the surface.
-    - Decay: apply exponential decay to the heatmap at each step so previously explored regions cool down over time.
-    - An optional contact bonus can be added and scaled by novelty at actual contacts.
-    """
 
     def __init__(
         self,
         num_keypoints: Optional[int] = None,
         num_object_points: Optional[int] = None,
+        canonical_pointcloud: Optional[torch.Tensor] = None,
         *,
         device: Optional[torch.device] = None,
-        # default hyper-parameters
-        decay_factor: float = 0.999,  # decay per step for the heatmap
+        k: int = 8,  # number of KNN for generating expected position
         contact_bonus: float = 0.0,
         per_contact: bool = False,
         eps: float = 1e-8,
-        # Reachability threshold (key parameter)
-        reachability_threshold: float = 0.03,  # 3 cm;
-        # Clustering parameters
-        use_clustering: bool = True,
-        cluster_k: int = 16,
-        max_clustering_iters: int = 10,
+        potential_sigma: float = 0.05,  # empirical value
+        cluster_k: int = 64,  # number of clusters for object point cloud
+        max_clustering_iters: int = 10,  # max number of iterations for K-Means
+        multiplier_min: float = 0.5,
+        sim_threshold: float = 1.0,
     ):
         self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.canonical_pointcloud = canonical_pointcloud
+        # --- keep: point-level heatmap (for gradient computation) ---
+        self.contact_heatmap: Optional[torch.Tensor] = None  # long, (L, M)
 
-        # Global heatmap: (L, M) - per point or (L, cluster_k) - per cluster
-        self.contact_heatmap: Optional[torch.Tensor] = None
-        # If using clustering, this stores the cluster ID for each point in the point cloud
-        self._point_to_cluster: Optional[torch.Tensor] = None  # (M,)
-        # If using clustering, this stores the novelty score for each cluster (L, cluster_k)
-        self._cluster_novelty: Optional[torch.Tensor] = None
-
-        # Runtime cache
-        self.prev_expected_distance_mean: Optional[torch.Tensor] = None  # (N,)
+        # runtime cache
+        self.prev_potential: Optional[torch.Tensor] = None  # (N,) previous potential
 
         self.L = num_keypoints
         self.M = num_object_points
 
+        self.default_k = k
         self.default_contact_bonus = contact_bonus
         self.default_per_contact = per_contact
         self.eps = eps
 
-        # Reachability & Decay
-        self.decay_factor = decay_factor
-        self.reachability_threshold = reachability_threshold
+        # potential function parameter
+        self.potential_sigma = potential_sigma
 
-        # Clustering config
-        self.use_clustering = use_clustering
+        # cache for gradient computation
+        self.smoothed_heatmap: Optional[torch.Tensor] = None  # (N, L, M)
+        self.gradient_direction: Optional[torch.Tensor] = None  # (N, L, M, 3)
+        self.gradient_magnitude: Optional[torch.Tensor] = None  # (N, L, M)
+        
+        self.multiplier_min = multiplier_min
+        self.sim_threshold = sim_threshold
+
+        # cache KNN indices
+        self._knn_cache: Optional[torch.Tensor] = None  # (N, M, k)
+
+        # --- new: cluster related (only for contact reward) ---
         self.cluster_k = cluster_k
         self.max_clustering_iters = max_clustering_iters
-
-        # Cache
-        self.novelty_score: Optional[torch.Tensor] = None  # (L, M) or (L, cluster_k)
+        self._point_to_cluster: Optional[torch.Tensor] = None  # (M,) cluster id for each point in object point cloud
+        # for each fingertip, maintain a separate counter (L, cluster_k)
+        self._per_fingertip_cluster_counts: Optional[torch.Tensor] = None
+        
+        self._point_to_cluster = self._perform_clustering(self.canonical_pointcloud) 
+        self._per_fingertip_cluster_counts = torch.zeros((self.L, self.cluster_k), dtype=torch.long, device=self.device)
 
 
     @torch.no_grad()
     def reset(self, env_ids: Optional[torch.LongTensor] = None, reset_counters: bool = False):
-        if reset_counters and self.contact_heatmap is not None:
-            self.contact_heatmap.zero_()
-        if self.prev_expected_distance_mean is not None:
+        if reset_counters:
+            if self.contact_heatmap is not None:
+                self.contact_heatmap.zero_()
+            if self._per_fingertip_cluster_counts is not None:
+                self._per_fingertip_cluster_counts.zero_()
+        if self.prev_potential is not None:
             if env_ids is None:
-                self.prev_expected_distance_mean = None
+                self.prev_potential = None
             else:
-                self.prev_expected_distance_mean[env_ids] = 0.0
+                self.prev_potential[env_ids] = 0.0
 
     @torch.no_grad()
     def reset_counters(self):
+        """zero out all counters"""
         if self.contact_heatmap is not None:
             self.contact_heatmap.zero_()
-
-    @torch.no_grad()
-    def _perform_clustering(self, pointcloud: torch.Tensor):
-        """
-        Args:
-            pointcloud: (M, 3)
-        Returns:
-            cluster_labels: (M,)
-        """
-        M, _ = pointcloud.shape
-        points = pointcloud.to(torch.float32)
-
-        # random initialize cluster centers
-        indices = torch.randperm(M, device=self.device)[:self.cluster_k]
-        centers = points[indices].clone()  # (cluster_k, 3)
-
-        for _ in range(self.max_clustering_iters):
-            # compute distance from each point to each center
-            distances = torch.cdist(points.unsqueeze(0), centers.unsqueeze(0)).squeeze(0)  # (M, cluster_k)
-            # assign points to the nearest center
-            labels = torch.argmin(distances, dim=1)  # (M,)
-            # recompute centers
-            new_centers = torch.zeros_like(centers)
-            for i in range(self.cluster_k):
-                mask = (labels == i)
-                if mask.any():
-                    new_centers[i] = points[mask].mean(dim=0)
-                else:
-                    # if a cluster has no points, keep the old center
-                    new_centers[i] = centers[i]
-            centers = new_centers
-
-        return labels
+        if self._per_fingertip_cluster_counts is not None:
+            self._per_fingertip_cluster_counts.zero_()
 
     @torch.no_grad()
     def update_contact_heatmap(self, contact_indices: torch.Tensor, contact_mask: torch.Tensor, num_object_points: Optional[int] = None):
+        """
+        update global contact heatmap (across environments)
+        - only update point-level heatmap `self.contact_heatmap`, for gradient computation
+        """
         assert contact_indices.dtype in (torch.int32, torch.int64)
         N, L = contact_indices.shape
 
@@ -128,14 +107,8 @@ class CuriosityRewardManager:
             assert self.M is not None, "num_object_points is required at first update"
 
         if self.contact_heatmap is None:
-            if self.use_clustering:
-                self.contact_heatmap = torch.zeros((self.L, self.cluster_k), dtype=torch.float32, device=self.device)
-            else:
-                self.contact_heatmap = torch.zeros((self.L, self.M), dtype=torch.float32, device=self.device)
+            self.contact_heatmap = torch.zeros((self.L, self.M), dtype=torch.long, device=self.device)
 
-        # Apply decay
-        self.contact_heatmap.mul_(self.decay_factor)
-        
         has = contact_mask
         if not has.any():
             return
@@ -143,121 +116,465 @@ class CuriosityRewardManager:
         env_idx, kp_idx = torch.nonzero(has, as_tuple=True)
         j_idx = contact_indices[env_idx, kp_idx].clamp(min=0, max=self.M - 1)
 
-        if self.use_clustering:
-            # if clustering mode, need to convert point index j_idx to cluster index
-            if self._point_to_cluster is None:
-                # Lazy clustering: perform clustering when first needed
-                sample_pc = contact_indices.new_zeros(self.M, 3) # Dummy, will be covered by compute_reward
-
-                raise RuntimeError("Clustering not initialized. Please call compute_reward first.")
-
-            cluster_idx = self._point_to_cluster[j_idx]  # (num_contacts,)
-            # Merge env dim for cluster indices
-            lin = kp_idx.to(torch.long) * self.cluster_k + cluster_idx.to(torch.long)
-            counts = torch.bincount(lin, minlength=self.L * self.cluster_k)
-            counts = counts.view(self.L, self.cluster_k).to(self.contact_heatmap.dtype).to(self.contact_heatmap.device)
-        else:
-            # per-point mode
-            lin = kp_idx.to(torch.long) * self.M + j_idx.to(torch.long)
-            counts = torch.bincount(lin, minlength=self.L * self.M)
-            counts = counts.view(self.L, self.M).to(self.contact_heatmap.dtype).to(self.contact_heatmap.device)
+        lin = kp_idx.to(torch.long) * self.M + j_idx.to(torch.long)
+        counts = torch.bincount(lin, minlength=self.L * self.M)
+        counts = counts.view(self.L, self.M).to(self.contact_heatmap.dtype).to(self.contact_heatmap.device)
 
         self.contact_heatmap.add_(counts)
+
+    @torch.no_grad()
+    def _perform_clustering(self, pointcloud: torch.Tensor):
+        M, _ = pointcloud.shape
+        points = pointcloud.to(torch.float32)
+
+        indices = torch.randperm(M, device=self.device)[:self.cluster_k]
+        centers = points[indices].clone()  # (cluster_k, 3)
+
+        for _ in range(self.max_clustering_iters):
+            distances = torch.cdist(points.unsqueeze(0), centers.unsqueeze(0)).squeeze(0)  # (M, cluster_k)
+            labels = torch.argmin(distances, dim=1)  # (M,)
+            new_centers = torch.zeros_like(centers)
+            for i in range(self.cluster_k):
+                mask = (labels == i)
+                if mask.any():
+                    new_centers[i] = points[mask].mean(dim=0)
+                else:
+                    new_centers[i] = centers[i]
+            centers = new_centers
+
+        return labels
 
     @torch.no_grad()
     def compute_reward(
         self,
         tau: float,
         object_pointclouds: torch.Tensor,   # (N, M, 3)
-        keypoint_positions: torch.Tensor,   # (N, L, 3)
-        contact_indices: Optional[torch.Tensor] = None,
-        contact_mask: Optional[torch.Tensor] = None,
+        keypoint_positions: torch.Tensor,   # (N, L, 3) — fingertip positions
+        contact_indices: Optional[torch.Tensor] = None,  # (N, L) long, [0..M-1]
+        contact_mask: Optional[torch.Tensor] = None,     # (N, L) bool
         *,
+        k: Optional[int] = None,
         contact_bonus: Optional[float] = None,
         per_contact: Optional[bool] = None,
+        object_normals: Optional[torch.Tensor] = None,   # (N, M, 3) optional, 本方案未使用
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-
+        """
+        * Legacy version of reward computation
+            1. 执行聚类 (如果需要) 并更新聚类计数器。
+            2. 更新点级热图 (用于梯度计算)。
+            3. 计算全局热图的平滑版本和梯度方向 (基于点级热图)。
+            4. 对于每个指尖，找到其**接触次数最多**的物体点 P_c (如果无接触，则用最近点)。
+            5. 在 P_c 处，用 -∇H 与 KNN 邻居向量的余弦相似度加权，生成一个“期望探索位置” P_target。
+            6. 计算每个指尖到其 P_target 的距离。
+            7. **奖励 = exp(-当前距离 / sigma) - exp(-上一步距离 / sigma)** (势能差分)。
+            8. 叠加基于聚类的新颖度接触奖励。
+        """
         device = object_pointclouds.device
         N, M, _ = object_pointclouds.shape
         _, L, _ = keypoint_positions.shape
 
+        k = int(k if k is not None else self.default_k)
         contact_bonus = float(contact_bonus if contact_bonus is not None else self.default_contact_bonus)
         per_contact = bool(self.default_per_contact if per_contact is None else per_contact)
 
-        # perform clustering if enabled and not initialized
-        if self.use_clustering and (self._point_to_cluster is None or self._point_to_cluster.shape[0] != M):
-            # use first env's point cloud for clustering
+        # --- Step 1: 执行聚类 (如果需要) 并更新聚类计数器 ---
+        if self._point_to_cluster is None or self._point_to_cluster.shape[0] != M:
             sample_pointcloud = object_pointclouds[0]  # (M, 3)
             self._point_to_cluster = self._perform_clustering(sample_pointcloud)  # (M,)
-            # initialize or reset cluster-level heatmap
-            if self.contact_heatmap is None or self.contact_heatmap.shape[1] != self.cluster_k:
-                self.contact_heatmap = torch.zeros((self.L, self.cluster_k), dtype=torch.float32, device=self.device)
+            # 初始化计数器
+            self._per_fingertip_cluster_counts = torch.zeros(
+                (self.L, self.cluster_k), dtype=torch.long, device=self.device
+            )
 
-        # Update heatmap
+        # 更新聚类计数器 (仅用于接触奖励)
+        cm = contact_mask.to(torch.bool) if contact_mask is not None else torch.zeros((N, L), dtype=torch.bool, device=device)
+        if (contact_indices is not None) and cm.any():
+            has = cm
+            ei, ki = torch.nonzero(has, as_tuple=True)  # (num_contacts,)
+            pj = contact_indices[ei, ki].clamp(0, M - 1)  # (num_contacts,)
+            # 获取接触点所属的簇ID
+            cluster_ids = self._point_to_cluster[pj]  # (num_contacts,)
+            # 更新计数器: lin_idx = ki * cluster_k + cluster_id
+            lin_idx = ki * self.cluster_k + cluster_ids
+            counts = torch.bincount(lin_idx, minlength=self.L * self.cluster_k)
+            counts = counts.view(self.L, self.cluster_k).to(self._per_fingertip_cluster_counts.dtype)
+            self._per_fingertip_cluster_counts.add_(counts)
+
+        # --- Step 2: 更新点级热图 (用于梯度计算) ---
         self.update_contact_heatmap(contact_indices.to(device), contact_mask.to(device), num_object_points=M)
 
-        # compute novelty score
-        if self.use_clustering:
-            # compute novelty for each cluster
-            cluster_novelty = 1.0 / (1.0 + self.contact_heatmap)  # (L, cluster_k)
-            self._cluster_novelty = cluster_novelty
-            # broadcast cluster novelty to each point
-            point_novelty = cluster_novelty[:, self._point_to_cluster]  # (L, M)
-            self.novelty_score = point_novelty
-        else:
-            # per-point 
-            point_novelty = 1.0 / (1.0 + self.contact_heatmap)  # (L, M)
-            self.novelty_score = point_novelty
+        # --- Step 3: 基于点级热图计算梯度 (保持不变) ---
+        contact_heatmap = self.contact_heatmap.to(torch.float32)  # (L, M)
+        H = contact_heatmap  # 直接使用点级计数作为H
 
-        # distances fingertip-to-all points
-        D = torch.cdist(keypoint_positions, object_pointclouds, p=2)     # (N, L, M)
+        # 获取 KNN 索引
+        k_eff = min(k, max(1, M))
+        if self._knn_cache is None or self._knn_cache.shape != (N, M, k_eff):
+            self._knn_cache = self._knn_indices(object_pointclouds, k=k_eff)  # (N, M, k)
+        knn_idx = self._knn_cache
 
-        # weights: novelty_score
-        weights = point_novelty.unsqueeze(0)  # (1, L, M) -> (N, L, M)
+        # 计算梯度
+        H_expanded = H.unsqueeze(0).expand(N, -1, -1)  # (N, L, M)
+        smoothed_heatmap, gradient_direction, gradient_magnitude = self._smooth_and_gradient(
+            object_pointclouds, H_expanded, knn_idx
+        )
+        self.smoothed_heatmap = smoothed_heatmap
+        self.gradient_direction = gradient_direction  # (N, L, M, 3)
+        self.gradient_magnitude = gradient_magnitude
 
-        # Apply reachability constraint
-        reachable = (D < self.reachability_threshold)
-        weights = weights * reachable.to(weights.dtype)
+        # --- Step 4: 为每个指尖生成“期望探索位置” P_target ---
+        # 4.1 找到每个指尖**接触次数最多**的物体点索引
+        # contact_heatmap: (L, M) - 每个指尖对每个点的累计接触次数
+        # 对于从未接触过的指尖，其热图全为0，argmax会返回0号点，这可能不合理。
+        # 因此，我们先检查是否有接触，如果没有，则回退到使用几何最近点。
 
-        # Compute weighted average distance
-        weighted_D = (weights * D).sum(dim=-1) / (weights.sum(dim=-1) + self.eps)  # (N, L)
-        avg_weighted_D = weighted_D.mean(dim=1)                                    # (N,)
+        # 计算几何最近点索引 (备用方案)
+        D_geom = torch.cdist(keypoint_positions, object_pointclouds, p=2)  # (N, L, M)
+        closest_point_idx_geom = D_geom.argmin(dim=-1)  # (N, L)
 
-        # progress reward
-        if (self.prev_expected_distance_mean is None) or (self.prev_expected_distance_mean.shape != (N,)):
-            self.prev_expected_distance_mean = avg_weighted_D.detach().clone()
-        r_progress = self.prev_expected_distance_mean - avg_weighted_D
-        self.prev_expected_distance_mean = avg_weighted_D.detach().clone()
+        # 初始化 P_c 的索引
+        closest_point_idx = torch.zeros((N, L), dtype=torch.long, device=device)
 
-        # contact bonus (no used for now)
-        cm = contact_mask.to(torch.bool) if contact_mask is not None else torch.zeros((N, L), dtype=torch.bool, device=device)
-        if per_contact:
-            bonus_term = cm.sum(dim=1).to(avg_weighted_D.dtype)
-        else:
-            bonus_term = cm.any(dim=1).to(avg_weighted_D.dtype)
+        for l in range(L):
+            # 获取第 l 个指尖的接触热图 (M,)
+            heatmap_l = contact_heatmap[l, :]
+            # 检查该指尖是否有过接触
+            if heatmap_l.sum() > 0:
+                # 有接触：选择接触次数最多的点
+                most_contacted_idx = heatmap_l.argmax()  # 标量
+                closest_point_idx[:, l] = most_contacted_idx
+            else:
+                # 无接触：回退到几何最近点
+                closest_point_idx[:, l] = closest_point_idx_geom[:, l]
 
-        novelty_hit = torch.zeros((N,), dtype=avg_weighted_D.dtype, device=device)
-        if (contact_indices is not None) and (contact_mask is not None):
-            novelty_on_hits = torch.zeros((N, L), dtype=avg_weighted_D.dtype, device=device)
+        # 4.2 为每个指尖的 P_c 点，获取其 KNN 邻居 (保持不变)
+        closest_knn_idx = torch.gather(
+            knn_idx.unsqueeze(1).expand(-1, L, -1, -1),  # (N, L, M, k)
+            dim=2,
+            index=closest_point_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, k_eff)  # (N, L, 1, k)
+        ).squeeze(2)  # (N, L, k)
+
+        # 4.3 获取 P_c 和其邻居 P_i 的坐标 (保持不变)
+        P_c = torch.gather(
+            object_pointclouds.unsqueeze(1).expand(-1, L, -1, -1),  # (N, L, M, 3)
+            dim=2,
+            index=closest_point_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 3)  # (N, L, 1, 3)
+        ).squeeze(2)  # (N, L, 3)
+
+        P_neighbors = torch.gather(
+            object_pointclouds.unsqueeze(1).expand(-1, L, -1, -1),  # (N, L, M, 3)
+            dim=2,
+            index=closest_knn_idx.unsqueeze(-1).expand(-1, -1, -1, 3)  # (N, L, k, 3)
+        )  # (N, L, k, 3)
+
+        # 4.4 计算从 P_c 指向每个邻居的向量 V_i (保持不变)
+        V_i = P_neighbors - P_c.unsqueeze(2)  # (N, L, k, 3)
+        V_i_norm = V_i / (V_i.norm(dim=-1, keepdim=True).clamp_min(self.eps))  # (N, L, k, 3)
+
+        # 4.5 获取在 P_c 处的梯度方向 -∇H (保持不变)
+        neg_grad_at_Pc = torch.gather(
+            gradient_direction,  # (N, L, M, 3)
+            dim=2,
+            index=closest_point_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 3)  # (N, L, 1, 3)
+        ).squeeze(2)  # (N, L, 3)
+
+        # 4.6 计算余弦相似度作为权重 w_i (保持不变)
+        w_i = (neg_grad_at_Pc.unsqueeze(2) * V_i_norm).sum(dim=-1)  # (N, L, k)
+        V_exp = (w_i.unsqueeze(-1) * V_i).sum(dim=2)  # (N, L, 3)
+        P_target = P_c + V_exp  # (N, L, 3)
+
+        # --- Step 5: 计算每个指尖到其 P_target 的距离 (保持不变) ---
+        dist_to_target = torch.norm(keypoint_positions - P_target, dim=-1)  # (N, L)
+        avg_dist_to_target = dist_to_target.mean(dim=1)  # (N,)
+
+        # --- Step 6: 使用势能函数计算奖励 (保持不变) ---
+        current_potential = torch.exp(-avg_dist_to_target / self.potential_sigma)  # (N,)
+
+        if (self.prev_potential is None) or (self.prev_potential.shape != (N,)):
+            self.prev_potential = current_potential.detach().clone()
+        r_progress = current_potential - self.prev_potential
+        self.prev_potential = current_potential.detach().clone()
+
+        # --- Step 7: 计算基于聚类的新颖度接触奖励 (保持不变) ---
+        contact_novelty_reward = torch.zeros((N, L), dtype=avg_dist_to_target.dtype, device=device)
+        if (contact_indices is not None) and cm.any():
             has = cm
-            if has.any():
-                ei, ki = torch.nonzero(has, as_tuple=True)
-                pj = contact_indices[ei, ki].clamp(0, M - 1)
-                if self.use_clustering:
-                    cluster_id_for_hits = self._point_to_cluster[pj]
-                    novelty_on_hits[ei, ki] = self._cluster_novelty[ki, cluster_id_for_hits]
-                else:
-                    novelty_on_hits[ei, ki] = point_novelty[ki, pj]
-            novelty_hit = novelty_on_hits.mean(dim=1)
-            bonus_term = bonus_term * (1.0 + novelty_hit)
+            ei, ki = torch.nonzero(has, as_tuple=True)  # (num_contacts,)
+            pj = contact_indices[ei, ki].clamp(0, M - 1)  # (num_contacts,)
+            cluster_ids = self._point_to_cluster[pj]  # (num_contacts,)
+            counts = self._per_fingertip_cluster_counts[ki, cluster_ids]  # (num_contacts,)
+            contact_novelty_reward[ei, ki] = 1.0 / torch.sqrt(1.0 + counts.float())
+
+        bonus_term = contact_novelty_reward.mean(dim=1)  # (N,)
+        reward = r_progress + contact_bonus * bonus_term
+
+        self.last_P_target = P_target.detach().clone()  # (N, L, 3)
+
+        info = {
+            "avg_dist_to_target": avg_dist_to_target,  # (N,)
+            "progress": r_progress,                    # (N,)
+            "contact_count": cm.sum(dim=1),            # (N,) - 总接触次数
+            "cluster_novelty_reward": bonus_term,      # (N,) - 基于聚类的新颖度奖励
+            "current_potential": current_potential,    # (N,)
+        }
+        return reward, info
+
+
+
+    @torch.no_grad()
+    def _knn_indices(self, X: torch.Tensor, k: int) -> torch.Tensor:
+        """assume all env use the same point cloud"""
+        N, M, _ = X.shape
+        d_first = torch.cdist(X[0:1], X[0:1], p=2).squeeze(0)  # Shape: (M, M)
+        # Get KNN indices for the first point cloud
+        knn_idx_first = d_first.topk(k=k, dim=-1, largest=False).indices  # Shape: (M, k)
+        # Expand the result to all N environments
+        knn_idx = knn_idx_first.unsqueeze(0).expand(N, -1, -1)  # Shape: (N, M, k)
+        return knn_idx
+
+    @torch.no_grad()
+    def _smooth_and_gradient(
+        self,
+        pc: torch.Tensor,                # (N, M, 3) or (M, 3)
+        H: torch.Tensor,                 # (N, L, M) or (L, M)
+        knn_idx: torch.Tensor,           # (N, M, k) or (M, k)
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+        has_batch = (pc.dim() == 3)
+        if not has_batch:
+            # to with bath
+            pc = pc.unsqueeze(0)          # (1, M, 3)
+            H = H.unsqueeze(0)            # (1, L, M)
+            knn_idx = knn_idx.unsqueeze(0)  # (1, M, k)
+
+        N, M, _ = pc.shape
+        _, L, M2 = H.shape
+        assert M == M2
+        k = knn_idx.size(-1)
+        device = pc.device
+
+        Hf = H.to(torch.float32)  # (N, L, M)
+
+        H_nb = torch.gather(
+            Hf.unsqueeze(-1).expand(-1, -1, -1, k),  # (N, L, M, k)
+            dim=2,
+            index=knn_idx.unsqueeze(1).expand(-1, L, -1, -1)  # (N, L, M, k)
+        )  # (N, L, M, k)
+
+        smoothed_heatmap = 0.5 * Hf + 0.5 * H_nb.mean(dim=-1)  # (N, L, M)
+
+        knn_idx_reshaped = knn_idx.view(N, M*k)  # (N, M*k)
+        X_nb_flat = torch.gather(
+            pc,  # (N, M, 3)
+            dim=1,
+            index=knn_idx_reshaped.unsqueeze(-1).expand(N, M*k, 3)  # (N, M*k, 3)
+        )  # (N, M*k, 3)
+        X_nb_base = X_nb_flat.view(N, M, k, 3)  # (N, M, k, 3)
+        
+        X_nb = X_nb_base.unsqueeze(1).expand(-1, L, -1, -1, -1)  # (N, L, M, k, 3)
+        
+        X = pc.unsqueeze(1).expand(-1, L, -1, -1)  # (N, L, M, 3)
+
+        dX = X_nb - X.unsqueeze(-2)                 # (N, L, M, k, 3)
+        dH = H_nb - smoothed_heatmap.unsqueeze(-1)  # (N, L, M, k)
+
+        denom = (dX.pow(2).sum(dim=-1) + self.eps)  # (N, L, M, k)
+        G = (dH.unsqueeze(-1) * dX / denom.unsqueeze(-1)).sum(dim=-2)  # (N, L, M, 3)
+
+        G_mag = G.norm(dim=-1)        # (N, L, M)
+        G_dir = torch.zeros_like(G)   # (N, L, M, 3)
+        nonzero = (G_mag > 1e-8)
+        if nonzero.any():
+            G_dir[nonzero] = (-G[nonzero] / G_mag[nonzero].unsqueeze(-1)) # -∇H
+
+        if not has_batch:
+            return smoothed_heatmap.squeeze(0), G_dir.squeeze(0), G_mag.squeeze(0)
+
+        return smoothed_heatmap, G_dir, G_mag
+
+    @torch.no_grad()
+    def compute_reward_from_canonical(
+        self,
+        *,
+        object_positions: torch.Tensor,        # (N, 3)
+        object_orientations: torch.Tensor,     # (N, 4) [x,y,z,w]
+        keypoint_positions_world: torch.Tensor,# (N, L, 3)
+        contact_indices: Optional[torch.Tensor] = None,  # (N, L)
+        contact_mask: Optional[torch.Tensor] = None,     # (N, L)
+        k: Optional[int] = None,
+        contact_bonus: Optional[float] = None,
+        per_contact: Optional[bool] = None,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        compute reward based on canonical point cloud
+        - use canonical point cloud to compute gradient
+        - compute P_target in object local coordinates
+        - compute potential-based reaching reward
+        - compute novelty-based contact reward
+        - return reward and info
+        """
+        device = keypoint_positions_world.device
+        N, L, _ = keypoint_positions_world.shape
+        M = self.canonical_pointcloud.shape[0]
+
+        k = int(k if k is not None else self.default_k)
+        contact_bonus = float(contact_bonus if contact_bonus is not None else self.default_contact_bonus)
+        per_contact = bool(self.default_per_contact if per_contact is None else per_contact)
+
+        # Step 1: cluster (only for contact reward)
+        cm = contact_mask.to(torch.bool) if contact_mask is not None else torch.zeros((N, L), dtype=torch.bool, device=device)
+        if (contact_indices is not None) and cm.any():
+            has = cm
+            ei, ki = torch.nonzero(has, as_tuple=True)
+            pj = contact_indices[ei, ki].clamp(0, M - 1)
+            cluster_ids = self._point_to_cluster[pj]
+            lin_idx = ki * self.cluster_k + cluster_ids
+            counts = torch.bincount(lin_idx, minlength=L * self.cluster_k)
+            counts = counts.view(L, self.cluster_k).to(self._per_fingertip_cluster_counts.dtype)
+            self._per_fingertip_cluster_counts.add_(counts)
+
+        # Step 2: update global point-level heatmap, for gradient computation
+        if contact_indices is None:
+            contact_indices = torch.zeros((N, L), dtype=torch.long, device=device)
+        if contact_mask is None:
+            contact_mask = torch.zeros((N, L), dtype=torch.bool, device=device)
+        self.update_contact_heatmap(contact_indices.to(device), contact_mask.to(device), num_object_points=M)
+
+        # Step 3: compute gradient based on canonical point cloud (only N=1)
+        contact_heatmap = self.contact_heatmap.to(torch.float32)  # (L, M)
+        H = contact_heatmap
+        k_eff = min(k, max(1, M))
+        # only use the first (canonical) point cloud to compute KNN, and reuse for all envs
+        X = self.canonical_pointcloud.unsqueeze(0)  # (1, M, 3)
+        if self._knn_cache is None or self._knn_cache.shape != (1, M, k_eff):
+            self._knn_cache = self._knn_indices(X, k=k_eff)  # (1, M, k)
+        knn_idx = self._knn_cache  # (1, M, k)
+
+        H_expanded = H.unsqueeze(0)  # (1, L, M)
+        smoothed_heatmap, gradient_direction, gradient_magnitude = self._smooth_and_gradient(
+            X, H_expanded, knn_idx
+        )
+
+        self.smoothed_heatmap = smoothed_heatmap
+        self.gradient_direction = gradient_direction  # (1, L, M, 3)
+        self.gradient_magnitude = gradient_magnitude
+
+        # Step 4: compute P_target in object local coordinates
+        # convert fingertip positions from world to local
+        # p_local = R^T (p_world - t)
+        from .torch_utils import quat_conjugate, quat_apply
+        q = object_orientations
+        t = object_positions
+        q_conj = quat_conjugate(q)
+        kp_local = quat_apply(q_conj.unsqueeze(1).expand(-1, L, -1), keypoint_positions_world - t.unsqueeze(1))  # (N,L,3)
+
+        # Ruoyi: previous strategy
+        # d_local = torch.cdist(kp_local, self.canonical_pointcloud.unsqueeze(0).expand(N, -1, -1), p=2)  # (N,L,M)
+        # closest_point_idx = d_local.argmin(dim=-1)  # (N,L)
+        
+        # closest_point_idx = torch.where(
+        #     self.contact_heatmap.sum(dim=-1) > 0,
+        #     self.contact_heatmap.argmax(dim=-1),
+        #     closest_point_idx
+        # )
+        
+        # closest_knn_idx = torch.gather(
+        #     knn_idx.unsqueeze(1).expand(N, L, -1, -1),  # (N,L,M,k)
+        #     dim=2,
+        #     index=closest_point_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, k_eff)
+        # ).squeeze(2)  # (N,L,k)
+
+        # P_c = self.canonical_pointcloud.unsqueeze(0).unsqueeze(1).expand(N, L, -1, -1)
+        # P_c = torch.gather(P_c, dim=2, index=closest_point_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 3)).squeeze(2)  # (N,L,3)
+
+        # P_neighbors = self.canonical_pointcloud.unsqueeze(0).unsqueeze(1).expand(N, L, -1, -1)
+        # P_neighbors = torch.gather(P_neighbors, dim=2, index=closest_knn_idx.unsqueeze(-1).expand(-1, -1, -1, 3))  # (N,L,k,3)
+
+        # V_i = P_neighbors - P_c.unsqueeze(2)  # (N,L,k,3)
+        # V_i_norm = V_i / (V_i.norm(dim=-1, keepdim=True).clamp_min(self.eps))
+
+        # neg_grad_at_Pc = torch.gather(
+        #     gradient_direction.expand(N, -1, -1, -1),  # (N,L,M,3)
+        #     dim=2,
+        #     index=closest_point_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 3)
+        # ).squeeze(2)  # (N,L,3)
+
+        # w_i = (neg_grad_at_Pc.unsqueeze(2) * V_i_norm).sum(dim=-1)  # (N,L,k)
+        # V_exp = (w_i.unsqueeze(-1) * V_i).sum(dim=2)  # (N,L,3)
+        # P_target_local = P_c + V_exp  # (N,L,3)
+        
+
+        per_l_counts = self._per_fingertip_cluster_counts  # (L, K)
+        chosen_cluster = torch.argmax(per_l_counts, dim=1)  # (L,)
+
+        point_clusters = self._point_to_cluster  # (M,)
+        # inside_cluster_mask: (L, M)
+        inside_cluster_mask = (point_clusters.unsqueeze(0).expand(L, -1) == chosen_cluster.unsqueeze(1))
+        # expand to (N, L, M)
+        inside_cluster_mask = inside_cluster_mask.unsqueeze(0).expand(N, -1, -1)
+
+        # cosine similarity: g_dir and unit vector of (X_j - kp_local) 
+        g_dir = gradient_direction.expand(N, -1, -1, -1)   # (N,L,M,3)
+        Xj = self.canonical_pointcloud.view(1, 1, M, 3).expand(N, L, -1, -1)  # (N,L,M,3)
+        v = Xj - kp_local.unsqueeze(2)                      # (N,L,M,3)
+        v_norm = v / (v.norm(dim=-1, keepdim=True).clamp_min(self.eps))
+        s = (g_dir * v_norm).sum(dim=-1)                    # (N,L,M) in [-1,1]
+
+        # base distance d_local
+        d_local = torch.norm(kp_local.unsqueeze(2) - Xj, dim=-1)  # (N,L,M)
+
+        # multiplier ∈ [multiplier_min,1]
+        multiplier = torch.ones_like(d_local)  # (N,L,M)
+        pos = (s > self.sim_threshold) & inside_cluster_mask
+        if self.sim_threshold < 1.0:
+            scale = (s[pos] - self.sim_threshold) / (1.0 - self.sim_threshold)
+        else:
+            scale = torch.zeros_like(s[pos])
+        multiplier[pos] = 1.0 - (1.0 - self.multiplier_min) * scale
+
+        # find the smallest  multiplied  l2 distance as and select this as reaching point
+        score = d_local * multiplier  # (N,L,M)
+        closest_point_idx = score.argmin(dim=-1)  # (N,L)
+        P_c = torch.gather(
+            Xj, dim=2,
+            index=closest_point_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 3)
+        ).squeeze(2)  # (N,L,3)
+        P_target_local = P_c
+
+        # Step 5: local to world
+        P_target_world = quat_apply(q.unsqueeze(1).expand(-1, L, -1), P_target_local) + t.unsqueeze(1)  # (N,L,3)
+
+        # Step 6: potential-based reaching reward
+        dist_to_target = torch.norm(keypoint_positions_world - P_target_world, dim=-1)  # (N,L)
+        avg_dist_to_target = dist_to_target.mean(dim=1)  # (N,)
+        current_potential = torch.exp(-avg_dist_to_target / self.potential_sigma)
+        if (self.prev_potential is None) or (self.prev_potential.shape != (N,)):
+            self.prev_potential = current_potential.detach().clone()
+        r_progress = current_potential - self.prev_potential
+        self.prev_potential = current_potential.detach().clone()
+
+        # Step 7: novelty-based contact reward
+        #Ruoyi: not tested/used for now
+        contact_novelty_reward = torch.zeros((N, L), dtype=avg_dist_to_target.dtype, device=device)
+        if (contact_indices is not None) and cm.any():
+            has = cm
+            ei, ki = torch.nonzero(has, as_tuple=True)
+            pj = contact_indices[ei, ki].clamp(0, M - 1)
+            cluster_ids = self._point_to_cluster[pj]
+            counts = self._per_fingertip_cluster_counts[ki, cluster_ids]
+            contact_novelty_reward[ei, ki] = 1.0 / torch.sqrt(1.0 + counts.float())
+        bonus_term = contact_novelty_reward.mean(dim=1)
 
         reward = r_progress + contact_bonus * bonus_term
 
+        # viz
+        self.last_P_target = P_target_world.detach().clone()
+
         info = {
-            "avg_weighted_distance": avg_weighted_D,
+            "avg_dist_to_target": avg_dist_to_target,
             "progress": r_progress,
             "contact_count": cm.sum(dim=1),
-            "novelty_hit_mean": novelty_hit,
-            "clustering_enabled": torch.tensor([self.use_clustering], device=device), # for logging
+            "cluster_novelty_reward": bonus_term,
+            "current_potential": current_potential,
         }
         return reward, info

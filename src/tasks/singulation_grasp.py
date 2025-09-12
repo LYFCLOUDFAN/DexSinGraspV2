@@ -940,11 +940,15 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.reach_curiosity_mgr = CuriosityRewardManager(
             num_keypoints=self._dims.NUM_FINGERTIPS.value,
             device=self.device,
-            decay_factor=0.999,
+            canonical_pointcloud=self.grasping_dataset._pointclouds[0], #NOTE: hardcode here, not per-env
+            k=8,  # highest point knn size
+            potential_sigma=0.05,
+            # contact reward parameters
             contact_bonus=0.0,
             per_contact=False,
-            reachability_threshold=0.03,
-            use_clustering=True,
+            # cluster parameters for contact reward
+            cluster_k=64,
+            max_clustering_iters=10,
         )
         
         self.obj_max_length = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -3024,7 +3028,8 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
 
     def _get_target_surface_points_world(self) -> torch.Tensor:
         # (num_envs, P, 3)
-        canonical = self.grasping_dataset._pointclouds[self.occupied_object_relative_indices]  # (N,P,3)
+        # canonical = self.grasping_dataset._pointclouds[self.occupied_object_relative_indices]  # (N,P,3)
+        canonical = self.grasping_dataset._pointclouds[[0] * self.num_envs]  # (N,P,3)
         pc_world = quat_rotate(self.object_root_orientations[:, None, :], canonical) + self.object_root_positions[:, None, :]
         return pc_world
     
@@ -3567,25 +3572,30 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         """Compute reach reward - curiosity-informed version using fingertip positions.
         """
         
-        obj_pc = self._get_target_surface_points_world()     # (N, M, 3)
-        kp_pos = self.fingertip_positions                    # (N, L=4, 3)
+        # World fingertip positions
+        kp_pos_world = self.fingertip_positions  # (N, L=4, 3)
 
         filtered_rel, _ = self.compute_contact_filtered_fingertips_relative_pos()  # (N,4,3), (N,)
         contact_mask = (filtered_rel.abs().sum(dim=-1) > 0)  # (N,4) bool
+        
+        canonical = self.reach_curiosity_mgr.canonical_pointcloud 
+        # project to world for each env
+        pc_world = quat_rotate(self.object_root_orientations[:, None, :], canonical.unsqueeze(0).expand(self.num_envs, -1, -1)) \
+                + self.object_root_positions[:, None, :]  # (N,M,3)
+        # compute per-fingertip nearest canonical index in world frame
+        d = torch.cdist(self.fingertip_positions, pc_world)        # (N,4,M)
+        contact_indices = d.argmin(dim=-1)                         # (N,4)
 
-        d = torch.cdist(kp_pos, obj_pc, p=2)                 # (N,4,M)
-        contact_indices = d.argmin(dim=-1)                   # (N,4) 
-
-        reward, info = self.reach_curiosity_mgr.compute_reward(
-            tau=0.002,
-            object_pointclouds=obj_pc,
-            keypoint_positions=kp_pos,
+        reward, info = self.reach_curiosity_mgr.compute_reward_from_canonical(
+            object_positions=self.object_root_positions,
+            object_orientations=self.object_root_orientations,
+            keypoint_positions_world=kp_pos_world,
             contact_indices=contact_indices,
             contact_mask=contact_mask,
         )
         
         self.reach_curiosity_rew = reward
-        self.reach_curiosity_rew_scaled = self.reach_curiosity_rew * 200
+        self.reach_curiosity_rew_scaled = self.reach_curiosity_rew * 20
         self.extras["reach_curiosity_rew"] = self.reach_curiosity_rew_scaled.clone()
 
     def compute_pre_grasp_reward(self):
@@ -4111,11 +4121,20 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         bonus_rew = self.near_goal * (self.reach_goal_bonus / self.success_steps)
 
         self.rew_buf[:] = (
-            self.reach_rew_scaled + self.pick_rew_scaled + self.targ_rew_scaled + bonus_rew + is_success * 4000
+            # self.reach_rew_scaled 
+            self.reach_curiosity_rew_scaled
+            + self.pick_rew_scaled 
+            + self.targ_rew_scaled 
+            + bonus_rew 
+            + is_success * 4000
         )
         # self.rew_buf[:] = self.reach_rew_scaled
         # self.rew_buf[:] += self.pre_grasp_rew_scaled
-        self.rew_buf[:] += self.curiosity_reward
+        # self.rew_buf[:] += self.curiosity_reward
+        
+        # self.rew_buf[:] = self.reach_curiosity_rew_scaled + self.reach_rew_scaled
+        # self.rew_buf[:] = self.reach_rew_scaled
+        
         self.task_reward = self.rew_buf.clone()
         
         # self.compute_safety_penalty()
@@ -4970,6 +4989,25 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
                 self.draw_force_sensor_axes()
                 
             self.draw_link_keypoints()
+            
+            if hasattr(self.reach_curiosity_mgr, 'last_P_target'):
+                P_target = self.reach_curiosity_mgr.last_P_target  # Shape: (N, L, 3)
+                if P_target is not None and P_target.numel() > 0:
+                    # Ensure the tensor is on the correct device
+                    if P_target.device != self.device:
+                        P_target = P_target.to(self.device)
+                    
+                    # Use the draw_points function to visualize the target positions
+                    # This function is already tensorized and parallelized
+                    draw_points(
+                        self.gym,
+                        self.viewer,
+                        self.envs,
+                        P_target,  # (N, L, 3) - Batch of fingertip target positions
+                        radius=0.01,  # Adjust size as needed
+                        num_segments=10,
+                        color=(1.0, 0.0, 0.0)  # Red color for targets
+                    )
 
     def reset_obj_vel(self, env_ids):
         # important reset object velocity and angular velocity to zero
