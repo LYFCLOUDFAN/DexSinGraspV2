@@ -49,6 +49,23 @@ class XArmAllegroHandCubeInBox(XArmAllegroHandFunctionalManipulationUnderarm):
         table_top_z = self._table_pose_tensor[2] + self._table_thickness * 0.5
         rim_z = table_top_z + self.container_floor_thickness + self.container_height
         self._container_rim_z = torch.full((self.num_envs,), float(rim_z), device=self.device, dtype=torch.float)
+        
+
+    def _create_box_grid_dataset(self, device=None) -> None:
+        # Create simple box grid dataset for singulation task
+        from .dataset import BoxGridDataset
+
+        self.grasping_dataset = BoxGridDataset(
+            grid_rows=self._grid_rows,
+            grid_cols=self._grid_cols,
+            grid_layers=self._grid_layers,
+            box_width=self.cube_width,
+            box_depth=self.cube_length,
+            box_height=self.cube_height,
+            device=device,
+        )
+
+        self.num_categories = self.grasping_dataset._category_matrix.shape[1]
 
     def _define_container(self) -> dict:
         """
@@ -97,6 +114,7 @@ class XArmAllegroHandCubeInBox(XArmAllegroHandFunctionalManipulationUnderarm):
             "num_rigid_bodies": sum(self.gym.get_asset_rigid_body_count(a) for a in [floor_asset, wall_y_asset, wall_x_asset]),
             "num_rigid_shapes": sum(self.gym.get_asset_rigid_shape_count(a) for a in [floor_asset, wall_y_asset, wall_x_asset]),
         }
+        
     def _define_table(self) -> Dict[str, Any]:
         asset_options = gymapi.AssetOptions()
         asset_options.fix_base_link = True
