@@ -20,6 +20,7 @@ class CuriosityRewardManager:
         max_clustering_iters: int = 10,  # max number of iterations for K-Means
         multiplier_min: float = 0.5,
         sim_threshold: float = 1.0,
+        threshold_ratio: float = 0.5,
     ):
         self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.canonical_pointcloud = canonical_pointcloud
@@ -47,6 +48,7 @@ class CuriosityRewardManager:
         
         self.multiplier_min = multiplier_min
         self.sim_threshold = sim_threshold
+        self.threshold_ratio = threshold_ratio
 
         # cache KNN indices
         self._knn_cache: Optional[torch.Tensor] = None  # (N, M, k)
@@ -533,20 +535,32 @@ class CuriosityRewardManager:
         # cosine sim：s = dot(u_anchor_dir, v_norm) ∈ [-1, 1]
         s = (u_anchor_dir * v_norm).sum(dim=-1)  # (N,L,M)
 
-        # 基础距离 d_local (keypoint_local 到各点距离)
+
         d_local = torch.norm(kp_local.unsqueeze(2) - Xj, dim=-1)  # (N,L,M)
 
         # multiplier∈[multiplier_min, 1]，仅在锚点簇内，并且 s > sim_threshold 时降低
-        multiplier = torch.ones_like(d_local)  # (N,L,M)
-        pos = (s > self.sim_threshold) & inside_cluster_mask
-        if self.sim_threshold < 1.0:
-            scale = (s[pos] - self.sim_threshold) / (1.0 - self.sim_threshold)
-        else:
-            scale = torch.zeros_like(s[pos])
-        multiplier[pos] = 1.0 - (1.0 - self.multiplier_min) * scale
+        # s = dot(u_anchor_dir, v)  # (N,L,M), 未归一化投影
+        s = (u_anchor_dir * v).sum(dim=-1)
 
-        score = d_local * multiplier  # (N,L,M)
-        closest_point_idx = score.argmin(dim=-1)  # (N,L)
+        # 簇内最大投影 s_max，用 -inf 屏蔽簇外
+        s_masked = torch.where(inside_cluster_mask, s, torch.full_like(s, float('-inf')))
+        s_max = s_masked.max(dim=-1, keepdim=True).values  # (N,L,1)
+
+        # 阈值 & 选择强同向点
+        threshold = s_max * self.threshold_ratio
+        pos = (s > threshold) & inside_cluster_mask
+
+        # 线性映射 [threshold, s_max] → [0,1]
+        scale = torch.zeros_like(s)
+        valid = pos & (s_max > self.eps)
+        scale[valid] = (s[valid] - threshold[valid]) / (s_max[valid] - threshold[valid]).clamp_min(self.eps)
+
+        # 仅对强同向簇内点降低 multiplier；其它保持 1
+        multiplier = torch.ones_like(d_local)
+        multiplier[pos] = self.multiplier_min + (1.0 - self.multiplier_min) * (1.0 - scale[pos])
+
+        score = d_local * multiplier
+        closest_point_idx = score.argmin(dim=-1)
         P_c = torch.gather(Xj, dim=2, index=closest_point_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 3)).squeeze(2)  # (N,L,3)
         P_target_local = P_c
 
