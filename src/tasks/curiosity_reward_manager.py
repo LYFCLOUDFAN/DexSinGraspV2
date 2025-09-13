@@ -504,26 +504,39 @@ class CuriosityRewardManager:
         # P_target_local = P_c + V_exp  # (N,L,3)
         
 
-        per_l_counts = self._per_fingertip_cluster_counts  # (L, K)
-        chosen_cluster = torch.argmax(per_l_counts, dim=1)  # (L,)
+        anchor_idx = torch.argmax(self.contact_heatmap, dim=-1)  # (L,) 
+        anchor_cluster = self._point_to_cluster[anchor_idx]       # (L,)
 
+        # 构造锚点所在簇的mask: (N, L, M)
         point_clusters = self._point_to_cluster  # (M,)
-        # inside_cluster_mask: (L, M)
-        inside_cluster_mask = (point_clusters.unsqueeze(0).expand(L, -1) == chosen_cluster.unsqueeze(1))
-        # expand to (N, L, M)
-        inside_cluster_mask = inside_cluster_mask.unsqueeze(0).expand(N, -1, -1)
+        inside_cluster_mask = (point_clusters.unsqueeze(0).expand(self.L, -1) == anchor_cluster.unsqueeze(1))  # (L,M)
+        inside_cluster_mask = inside_cluster_mask.unsqueeze(0).expand(N, -1, -1)  # (N,L,M)
 
-        # cosine similarity: g_dir and unit vector of (X_j - kp_local) 
-        g_dir = gradient_direction.expand(N, -1, -1, -1)   # (N,L,M,3)
+        # 取锚点位置 X_anchor: (L,3) → (N,L,1,3)
+        X_anchor = self.canonical_pointcloud[anchor_idx]  # (L,3)
+        X_anchor = X_anchor.unsqueeze(0).unsqueeze(2).expand(N, L, 1, 3)  # (N,L,1,3)
+
+        # 取锚点方向 u_anchor_dir: gradient_direction[0, L, M, 3] → (L,3) → (N,L,1,3)
+        gd = gradient_direction.squeeze(0)  # (L,M,3)
+        idx_gd = anchor_idx.view(self.L, 1, 1).expand(self.L, 1, 3)
+        u_anchor_dir = torch.gather(gd, dim=1, index=idx_gd).squeeze(1)  # (L,3)
+        # 归一化，防止零向量
+        u_norm = torch.norm(u_anchor_dir, dim=-1, keepdim=True).clamp_min(self.eps)
+        u_anchor_dir = u_anchor_dir / u_norm
+        u_anchor_dir = u_anchor_dir.unsqueeze(0).unsqueeze(2).expand(N, L, 1, 3)  # (N,L,1,3)
+
+        # 全点位置与锚点差向量 v = X_j - X_anchor
         Xj = self.canonical_pointcloud.view(1, 1, M, 3).expand(N, L, -1, -1)  # (N,L,M,3)
-        v = Xj - kp_local.unsqueeze(2)                      # (N,L,M,3)
-        v_norm = v / (v.norm(dim=-1, keepdim=True).clamp_min(self.eps))
-        s = (g_dir * v_norm).sum(dim=-1)                    # (N,L,M) in [-1,1]
+        v = Xj - X_anchor  # (N,L,M,3)
+        v_norm = v / (v.norm(dim=-1, keepdim=True).clamp_min(self.eps))  # (N,L,M,3)
 
-        # base distance d_local
+        # cosine sim：s = dot(u_anchor_dir, v_norm) ∈ [-1, 1]
+        s = (u_anchor_dir * v_norm).sum(dim=-1)  # (N,L,M)
+
+        # 基础距离 d_local (keypoint_local 到各点距离)
         d_local = torch.norm(kp_local.unsqueeze(2) - Xj, dim=-1)  # (N,L,M)
 
-        # multiplier ∈ [multiplier_min,1]
+        # multiplier∈[multiplier_min, 1]，仅在锚点簇内，并且 s > sim_threshold 时降低
         multiplier = torch.ones_like(d_local)  # (N,L,M)
         pos = (s > self.sim_threshold) & inside_cluster_mask
         if self.sim_threshold < 1.0:
@@ -532,13 +545,9 @@ class CuriosityRewardManager:
             scale = torch.zeros_like(s[pos])
         multiplier[pos] = 1.0 - (1.0 - self.multiplier_min) * scale
 
-        # find the smallest  multiplied  l2 distance as and select this as reaching point
         score = d_local * multiplier  # (N,L,M)
         closest_point_idx = score.argmin(dim=-1)  # (N,L)
-        P_c = torch.gather(
-            Xj, dim=2,
-            index=closest_point_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 3)
-        ).squeeze(2)  # (N,L,3)
+        P_c = torch.gather(Xj, dim=2, index=closest_point_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 3)).squeeze(2)  # (N,L,3)
         P_target_local = P_c
 
         # Step 5: local to world
