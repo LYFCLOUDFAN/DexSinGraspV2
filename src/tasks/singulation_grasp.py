@@ -4367,6 +4367,10 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
             self.obj_height_displacement_min[env_ids] = 0.15
         if hasattr(self, "fingertips_to_obj_dist_surface_min"):
             self.fingertips_to_obj_dist_surface_min[env_ids] = torch.tensor([0.2, 0.2, 0.2, 0.5], device=self.device).unsqueeze(0).unsqueeze(-1)
+            
+        if self.reach_curiosity_mgr.potential_per_kp_max is None:
+            self.reach_curiosity_mgr.potential_per_kp_max = torch.zeros((self.num_envs, 4), dtype=torch.float, device=self.device) # NOTE: hardcore keypoint number
+        self.reach_curiosity_mgr.potential_per_kp_max[env_ids] = 0
 
         # Set occupied object root positions & orientations
         self.root_positions[self.object_indices.view(self.num_envs, -1)[env_ids], :] = self.init_scene_object_root_positions[env_ids, :]

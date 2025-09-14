@@ -18,8 +18,7 @@ class CuriosityRewardManager:
         potential_sigma: float = 0.05,  # empirical value
         cluster_k: int = 64,  # number of clusters for object point cloud
         max_clustering_iters: int = 10,  # max number of iterations for K-Means
-        multiplier_min: float = 0.5,
-        sim_threshold: float = 1.0,
+        multiplier_min: float = 0.0,
         threshold_ratio: float = 0.2,
     ):
         self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -29,6 +28,7 @@ class CuriosityRewardManager:
 
         # runtime cache
         self.prev_potential: Optional[torch.Tensor] = None  # (N,) previous potential
+        self.potential_per_kp_max: Optional[torch.Tensor] = None  # (N, L) previous potential per keypoint
 
         self.L = num_keypoints
         self.M = num_object_points
@@ -47,7 +47,6 @@ class CuriosityRewardManager:
         self.gradient_magnitude: Optional[torch.Tensor] = None  # (N, L, M)
         
         self.multiplier_min = multiplier_min
-        self.sim_threshold = sim_threshold
         self.threshold_ratio = threshold_ratio
 
         # cache KNN indices
@@ -538,7 +537,7 @@ class CuriosityRewardManager:
 
         d_local = torch.norm(kp_local.unsqueeze(2) - Xj, dim=-1)  # (N,L,M)
 
-        # multiplier∈[multiplier_min, 1]，仅在锚点簇内，并且 s > sim_threshold 时降低
+        # multiplier∈[multiplier_min, 1]，仅在锚点簇内
         # s = dot(u_anchor_dir, v)  # (N,L,M), 未归一化投影
         s = (u_anchor_dir * v).sum(dim=-1)
 
@@ -575,16 +574,23 @@ class CuriosityRewardManager:
         # Step 6: potential-based reaching reward
         dist_to_target = torch.norm(keypoint_positions_world - P_target_world, dim=-1)  # (N,L)
         avg_dist_to_target = dist_to_target.mean(dim=1)  # (N,)
-        current_potential = torch.exp(-avg_dist_to_target / self.potential_sigma)
-        if (self.prev_potential is None) or (self.prev_potential.shape != (N,)):
-            self.prev_potential = current_potential.detach().clone()
-        r_progress = current_potential - self.prev_potential
-        self.prev_potential = current_potential.detach().clone()
+        # current_potential = torch.exp(-avg_dist_to_target / self.potential_sigma)
+        # if (self.prev_potential is None) or (self.prev_potential.shape != (N,)):
+        #     self.prev_potential = current_potential.detach().clone()
+        # r_progress = current_potential - self.prev_potential
+        # self.prev_potential = current_potential.detach().clone()
+            
+        current_potential_per_kp = torch.exp(-dist_to_target / self.potential_sigma)
+        if self.potential_per_kp_max is None or (self.potential_per_kp_max.shape != (N, L)):
+            self.potential_per_kp_max = torch.zeros_like(current_potential_per_kp) # E_d = 0 -> dist -> inf
+        current_potential = self.potential_per_kp_max.mean(dim=-1)
+        r_progress = torch.clip(current_potential_per_kp - self.potential_per_kp_max, min=0).mean(dim=-1)
+        self.potential_per_kp_max = torch.max(self.potential_per_kp_max, current_potential_per_kp)
 
         # Step 7: novelty-based contact reward
         #Ruoyi: not tested/used for now
         contact_novelty_reward = torch.zeros((N, L), dtype=avg_dist_to_target.dtype, device=device)
-        if (contact_indices is not None) and cm.any():
+        if contact_bonus > 0 and(contact_indices is not None) and cm.any():
             has = cm
             ei, ki = torch.nonzero(has, as_tuple=True)
             pj = contact_indices[ei, ki].clamp(0, M - 1)
