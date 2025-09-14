@@ -3595,7 +3595,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         )
         
         self.reach_curiosity_rew = reward
-        self.reach_curiosity_rew_scaled = self.reach_curiosity_rew * 20
+        self.reach_curiosity_rew_scaled = self.reach_curiosity_rew * 10
         self.extras["reach_curiosity_rew"] = self.reach_curiosity_rew_scaled.clone()
 
     def compute_pre_grasp_reward(self):
@@ -4997,17 +4997,16 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
                     if P_target.device != self.device:
                         P_target = P_target.to(self.device)
                     
-                    # Use the draw_points function to visualize the target positions
-                    # This function is already tensorized and parallelized
-                    draw_points(
-                        self.gym,
-                        self.viewer,
-                        self.envs,
-                        P_target,  # (N, L, 3) - Batch of fingertip target positions
-                        radius=0.01,  # Adjust size as needed
-                        num_segments=10,
-                        color=(1.0, 0.0, 0.0)  # Red color for targets
-                    )
+                    draw_points(self.gym, self.viewer, self.envs, P_target, radius=0.005, num_segments=10, color=(1.0, 0.0, 0.0))
+
+                    
+            if hasattr(self.reach_curiosity_mgr, 'last_anchor'):
+                anchor = self.reach_curiosity_mgr.last_anchor  # Shape: (N, L, 3)
+                if anchor is not None and anchor.numel() > 0:
+                    # Ensure the tensor is on the correct device
+                    if anchor.device != self.device:
+                        anchor = anchor.to(self.device)
+                    draw_points(self.gym, self.viewer, self.envs, anchor, radius=0.005, num_segments=10, color=(0.0, 0.0, 1.0))
 
     def reset_obj_vel(self, env_ids):
         # important reset object velocity and angular velocity to zero

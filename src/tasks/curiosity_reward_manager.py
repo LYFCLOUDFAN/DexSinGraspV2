@@ -20,7 +20,7 @@ class CuriosityRewardManager:
         max_clustering_iters: int = 10,  # max number of iterations for K-Means
         multiplier_min: float = 0.5,
         sim_threshold: float = 1.0,
-        threshold_ratio: float = 0.5,
+        threshold_ratio: float = 0.2,
     ):
         self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.canonical_pointcloud = canonical_pointcloud
@@ -552,8 +552,8 @@ class CuriosityRewardManager:
 
         # 线性映射 [threshold, s_max] → [0,1]
         scale = torch.zeros_like(s)
-        valid = pos & (s_max > self.eps)
-        scale[valid] = (s[valid] - threshold[valid]) / (s_max[valid] - threshold[valid]).clamp_min(self.eps)
+        valid = pos & (s_max > threshold)
+        scale[valid] = (s - threshold)[valid] / (s_max - threshold).expand_as(s)[valid].clamp_min(self.eps)
 
         # 仅对强同向簇内点降低 multiplier；其它保持 1
         multiplier = torch.ones_like(d_local)
@@ -563,9 +563,14 @@ class CuriosityRewardManager:
         closest_point_idx = score.argmin(dim=-1)
         P_c = torch.gather(Xj, dim=2, index=closest_point_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 3)).squeeze(2)  # (N,L,3)
         P_target_local = P_c
+        
+        original_closet_idx = d_local.argmin(dim=-1)
+        original_P_c = torch.gather(Xj, dim=2, index=original_closet_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 3)).squeeze(2)  # (N,L,3)
+        original_P_target_local = original_P_c
 
         # Step 5: local to world
         P_target_world = quat_apply(q.unsqueeze(1).expand(-1, L, -1), P_target_local) + t.unsqueeze(1)  # (N,L,3)
+        original_P_target_world = quat_apply(q.unsqueeze(1).expand(-1, L, -1), original_P_target_local) + t.unsqueeze(1)  # (N,L,3)
 
         # Step 6: potential-based reaching reward
         dist_to_target = torch.norm(keypoint_positions_world - P_target_world, dim=-1)  # (N,L)
@@ -592,6 +597,10 @@ class CuriosityRewardManager:
 
         # viz
         self.last_P_target = P_target_world.detach().clone()
+        self.last_original_P_target = original_P_target_world.detach().clone()
+        
+        anchor_world = quat_apply(q.unsqueeze(1).expand(-1, L, -1), X_anchor.squeeze(2)) + t.unsqueeze(1)
+        self.last_anchor = anchor_world.detach().clone()
 
         info = {
             "avg_dist_to_target": avg_dist_to_target,
