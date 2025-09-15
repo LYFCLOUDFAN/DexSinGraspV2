@@ -3578,8 +3578,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         filtered_rel, _ = self.compute_contact_filtered_fingertips_relative_pos()  # (N,4,3), (N,)
         contact_mask = (filtered_rel.abs().sum(dim=-1) > 0)  # (N,4) bool
         
-        canonical = self.reach_curiosity_mgr.canonical_pointcloud 
-        # project to world for each env
+        canonical = self.reach_curiosity_mgr.canonical_pointcloud
         pc_world = quat_rotate(self.object_root_orientations[:, None, :], canonical.unsqueeze(0).expand(self.num_envs, -1, -1)) \
                 + self.object_root_positions[:, None, :]  # (N,M,3)
         # compute per-fingertip nearest canonical index in world frame
@@ -4040,6 +4039,41 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.extras["position_success"] = position_success.float()
         self.extras["rotation_success"] = rotation_success.float()
 
+
+    def compute_palm_orientation_reward(self, sigma: float = 0.5):
+        """
+        Reward for aligning fingertip palm-side (local +x) toward the nearest object surface point.
+        """
+        pcl_world = self._get_target_surface_points_world()  # (N, P, 3)
+        energy_per_kp, theta_per_kp, _ = palm_alignment_energy(
+            # self.fingertip_positions,         # (N, L, 3)
+            # self.fingertip_orientations,      # (N, L, 4)
+            self.keypoint_positions,         # (N, L, 3)
+            self.keypoint_orientations,      # (N, L, 4)
+            pcl_world,                        # (N, P, 3)
+            sigma=sigma,
+        )
+
+        theta_mean = theta_per_kp.mean(dim=1)                  # (N,)
+        current_potential = torch.exp(-theta_mean / sigma)     # (N,)
+
+        if not hasattr(self, "prev_palm_alignment_energy") or (self.prev_palm_alignment_energy.shape != current_potential.shape):
+            self.prev_palm_alignment_energy = current_potential.detach().clone()
+
+        r_progress = (current_potential - self.prev_palm_alignment_energy) * 5
+        # r_progress = current_potential * 10
+        self.prev_palm_alignment_energy = current_potential.detach().clone()
+
+        self.extras["palm_alignment_theta_mean"] = theta_per_kp.mean(dim=1).clone()
+        self.extras["palm_alignment_energy_mean"] = current_potential.clone()
+        self.extras["palm_orientation_rew"] = r_progress.clone()
+
+        self.palm_alignment_theta = theta_per_kp
+        self.palm_alignment_energy = energy_per_kp
+        self.palm_orientation_rew = r_progress
+
+        return r_progress
+
     def compute_done(self, is_success):
         if not test_sim:
             if self.env_mode == "pgm":
@@ -4092,13 +4126,14 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         # self.compute_reach_reward()
         # self.compute_reach_reward_deprecated()
         # self.compute_reach_reward_each_fingertip(); self.reach_rew_scaled = self.reach_rew_each_fingertip_scaled
-        self.compute_reach_reward_keypoints(); self.reach_rew_scaled = self.reach_rew_scaled_keypoints.clone()
+        # self.compute_reach_reward_keypoints(); self.reach_rew_scaled = self.reach_rew_scaled_keypoints.clone()
         self.compute_curiosity_informed_reach_reward()
         # self.compute_pre_grasp_reward()
         self.compute_pick_reward()
         self.compute_targ_reward()
         
         
+        self.palm_alignment_rew = self.compute_palm_orientation_reward()
         self.curiosity_reward = self.compute_curiosity_reward()
         
         # print(self.curiosity_reward.mean())
@@ -4123,6 +4158,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         self.rew_buf[:] = (
             # self.reach_rew_scaled 
             self.reach_curiosity_rew_scaled
+            + self.palm_alignment_rew
             + self.pick_rew_scaled 
             + self.targ_rew_scaled 
             + bonus_rew 
@@ -4134,6 +4170,7 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         
         # self.rew_buf[:] = self.reach_curiosity_rew_scaled + self.reach_rew_scaled
         # self.rew_buf[:] = self.reach_rew_scaled
+        # self.rew_buf[:] = self.palm_alignment_rew
         
         self.task_reward = self.rew_buf.clone()
         
@@ -5340,6 +5377,57 @@ class XArmAllegroHandFunctionalManipulationUnderarm(VecTask):
         images = np.stack(images, axis=0)
         images = to_torch(images, device=self.device)
         return images
+
+
+@torch.no_grad()
+def palm_alignment_energy(
+    fingertip_positions: torch.Tensor,      # (N, L, 3)
+    link_orientations: torch.Tensor,        # (N, L, 4) [x,y,z,w]
+    surface_points: torch.Tensor,           # (N, P, 3)
+    sigma: float = 0.3,
+    eps: float = 1e-8,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Compute palm-alignment energy and angle per fingertip.
+    - Local x-axis is assumed to be the palm-facing axis in link-local frame.
+    - Energy per fingertip: exp(-theta / sigma), where theta is the angle between
+      the local x-axis (in world) and the vector from fingertip to nearest surface point.
+
+    Returns:
+      energy: (N, L) per-fingertip energy
+      theta:  (N, L) per-fingertip angle in radians
+      nn_idx: (N, L) nearest neighbor index in the surface point cloud
+    """
+    device = fingertip_positions.device
+    dtype = fingertip_positions.dtype
+    N, L, _ = fingertip_positions.shape
+
+    # Nearest surface point for each fingertip
+    dists = torch.cdist(fingertip_positions, surface_points)           # (N, L, P)
+    nn_idx = dists.argmin(dim=-1)                                      # (N, L)
+    nn_pts = torch.gather(
+        surface_points.unsqueeze(1).expand(-1, L, -1, -1),             # (N, L, P, 3)
+        2,
+        nn_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 3)        # (N, L, 1, 3)
+    ).squeeze(2)                                                        # (N, L, 3)
+
+    # Vector from fingertip to nearest surface point
+    v = nn_pts - fingertip_positions                                   # (N, L, 3)
+
+    # Local x-axis in world frame (x-axis points inward/palm direction)
+    x_local = torch.tensor([1.0, 0.0, 0.0], device=device, dtype=dtype).view(1, 1, 3).expand(N, L, 3)
+    x_world = quat_apply(link_orientations.reshape(-1, 4), x_local.reshape(-1, 3)).view(N, L, 3)
+
+    # Angle between v and x_world
+    v_n = v / (v.norm(dim=-1, keepdim=True).clamp_min(eps))
+    x_n = x_world / (x_world.norm(dim=-1, keepdim=True).clamp_min(eps))
+    cos_sim = (v_n * x_n).sum(dim=-1).clamp(-1.0, 1.0)                 # (N, L)
+    theta = torch.acos(cos_sim)                                        # (N, L)
+
+    # Energy-based alignment (higher is better)
+    energy = torch.exp(-theta / sigma)                                  # (N, L)
+    return energy, theta, nn_idx
+
 
 def compute_offset_point_world(
     obj_position: torch.Tensor,

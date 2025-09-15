@@ -574,18 +574,29 @@ class CuriosityRewardManager:
         # Step 6: potential-based reaching reward
         dist_to_target = torch.norm(keypoint_positions_world - P_target_world, dim=-1)  # (N,L)
         avg_dist_to_target = dist_to_target.mean(dim=1)  # (N,)
-        # current_potential = torch.exp(-avg_dist_to_target / self.potential_sigma)
+        
+        # aggregate first, then exp
+        current_potential = torch.exp(-avg_dist_to_target / self.potential_sigma)
+        if (self.prev_potential is None) or (self.prev_potential.shape != (N,)):
+            self.prev_potential = current_potential.detach().clone()
+        r_progress = current_potential - self.prev_potential
+        self.prev_potential = current_potential.detach().clone()
+        
+        # delayed aggregation: per-link energy first, then average over links
+        # current_potential_per_kp = torch.exp(-dist_to_target / self.potential_sigma)  # (N,L)
+        # current_potential = current_potential_per_kp.mean(dim=-1)  # (N,)
+
         # if (self.prev_potential is None) or (self.prev_potential.shape != (N,)):
         #     self.prev_potential = current_potential.detach().clone()
         # r_progress = current_potential - self.prev_potential
         # self.prev_potential = current_potential.detach().clone()
             
-        current_potential_per_kp = torch.exp(-dist_to_target / self.potential_sigma)
-        if self.potential_per_kp_max is None or (self.potential_per_kp_max.shape != (N, L)):
-            self.potential_per_kp_max = torch.zeros_like(current_potential_per_kp) # E_d = 0 -> dist -> inf
-        current_potential = self.potential_per_kp_max.mean(dim=-1)
-        r_progress = torch.clip(current_potential_per_kp - self.potential_per_kp_max, min=0).mean(dim=-1)
-        self.potential_per_kp_max = torch.max(self.potential_per_kp_max, current_potential_per_kp)
+        # current_potential_per_kp = torch.exp(-dist_to_target / self.potential_sigma)
+        # if self.potential_per_kp_max is None or (self.potential_per_kp_max.shape != (N, L)):
+        #     self.potential_per_kp_max = torch.zeros_like(current_potential_per_kp) # E_d = 0 -> dist -> inf
+        # current_potential = self.potential_per_kp_max.mean(dim=-1)
+        # r_progress = torch.clip(current_potential_per_kp - self.potential_per_kp_max, min=0).mean(dim=-1)
+        # self.potential_per_kp_max = torch.max(self.potential_per_kp_max, current_potential_per_kp)
 
         # Step 7: novelty-based contact reward
         #Ruoyi: not tested/used for now
