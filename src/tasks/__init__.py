@@ -9,6 +9,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from .functional_manipulation_underarm import ShadowHandFunctionalManipulationUnderarm
 from .singulation_grasp import XArmAllegroHandFunctionalManipulationUnderarm
+from .unpack_singulation_grasp import XArmAllegroHandCubeInBox
 from .singulation_grasp_w_fingertip import FloatingFingertipManipulation
 from .inhand_manipulation_allegro import InhandManipulationAllegro
 from .inhand_manipulation_shadow import InhandManipulationShadow
@@ -19,6 +20,7 @@ from .inhand_manipulation_shadow_spin_upside_down import InhandManipulationShado
 # isaacgym_task_map["ShadowHandFunctionalManipulation"] = ShadowHandFunctionalManipulation
 isaacgym_task_map["ShadowHandFunctionalManipulationUnderarm"] = ShadowHandFunctionalManipulationUnderarm
 isaacgym_task_map["XArmAllegroHandFunctionalManipulationUnderarm"] = XArmAllegroHandFunctionalManipulationUnderarm
+isaacgym_task_map["XArmAllegroHandCubeInBox"] = XArmAllegroHandCubeInBox
 isaacgym_task_map["FloatingFingertipManipulation"] = FloatingFingertipManipulation
 isaacgym_task_map["InhandManipulationAllegro"] = InhandManipulationAllegro
 isaacgym_task_map["InhandManipulationShadow"] = InhandManipulationShadow

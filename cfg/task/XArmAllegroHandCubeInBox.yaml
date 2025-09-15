@@ -1,11 +1,10 @@
 # used to create the object
-name: XArmAllegroHandFunctionalManipulationUnderarm
+name: XArmAllegroHandCubeInBox
 
 physics_engine: ${..physics_engine}
 
 defaults:
   - env/observationSpecs: xarm_allegro
-  # - env/curiosityObservationSpecs: xarm_allegro_curiosity
   - env/actionSpecs: xarm_allegro
 
 # if given, will override the device setting in gym.
@@ -87,7 +86,7 @@ env:
   enableCuriosity: True
   curiosity:
     mechanism: "fibonacci"
-    num_fib_points: 64
+    num_fib_points: 128
     per_finger: True
     num_fingers: 4
     obs_dim: 24 # 48 * 2 / 134 = 2 * 67
@@ -165,7 +164,7 @@ env:
     # - "xarm_rotation"
     # - "hand_rotation"
 
-  numObjects: ${resolve_default:3,${...num_objects}}
+  numObjects: ${resolve_default:1,${...num_objects}}
   numObjectsPerEnv: ${resolve_default:1,${...num_objects_per_env}}
   objectSpacing: 0.15
   resampleObject: ${resolve_default:False,${...resample_object}}
@@ -179,6 +178,18 @@ env:
   enableCameraSensors: False
   visEnvNum: 0
   visImageSize: 512
+
+  # container + cube
+  containerInnerWidth: 0.085         # X (meters)
+  containerInnerDepth: 0.090         # Y (meters)
+  containerHeight: 0.16             # Z (meters)
+  containerWallThickness: 0.008
+  containerFloorThickness: 0.008
+  cubeHeight: 0.16
+  cubeWidth: 0.08
+  cubeLength: 0.05
+  cubeInitJitter: 0.00
+  cubeOutClearance: 0.02
 
 logging:
   envInfo: ${resolve_default:False,${...env_info}}
