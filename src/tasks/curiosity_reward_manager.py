@@ -2,6 +2,54 @@ import torch
 from typing import Optional, Dict, Tuple
 
 
+@torch.no_grad()
+def fps(points: torch.Tensor, k: int, start_idx: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Farthest Point Sampling for a single point cloud.
+    Args:
+        points: (N, D) float tensor
+        k:      #centers
+        start_idx: 首个中心索引（可选），None 则随机
+    Returns:
+        idx:     (k,) long，被选点的索引（按采样顺序）
+        centers: (k, D) float，被选中心坐标
+    """
+    assert points.dim() == 2, "points should be (N, D)"
+    N, D = points.shape
+    k = min(k, N)
+    pts = points.to(dtype=torch.float32)
+    device = pts.device
+
+    dists = torch.full((N,), float('inf'), device=device)
+    idx = torch.empty((k,), dtype=torch.long, device=device)
+
+    farthest = torch.randint(0, N, (1,), device=device).item() if start_idx is None else int(start_idx) % N
+    for i in range(k):
+        idx[i] = farthest
+        center = pts[farthest].view(1, D)
+        dist2 = ((pts - center) ** 2).sum(dim=1)
+        dists = torch.minimum(dists, dist2)
+        farthest = torch.argmax(dists).item()
+
+    centers = pts[idx]
+    return idx, centers
+
+
+@torch.no_grad()
+def _assign_labels_by_nn(points: torch.Tensor, centers: torch.Tensor) -> torch.Tensor:
+    """
+    用平方欧氏距离把每个点分配到最近中心。
+    points:  (M, D)
+    centers: (k, D)
+    return:  labels (M,)
+    """
+    x2 = (points**2).sum(dim=1, keepdim=True)         # (M,1)
+    c2 = (centers**2).sum(dim=1).unsqueeze(0)         # (1,k)
+    dist2 = x2 - 2 * (points @ centers.T) + c2        # (M,k)
+    labels = dist2.argmin(dim=1)
+    return labels
+
+
 class CuriosityRewardManager:
 
     def __init__(
@@ -59,7 +107,7 @@ class CuriosityRewardManager:
         # for each fingertip, maintain a separate counter (L, cluster_k)
         self._per_fingertip_cluster_counts: Optional[torch.Tensor] = None
         
-        self._point_to_cluster = self._perform_clustering(self.canonical_pointcloud) 
+        self._point_to_cluster = self._perform_clustering_w_fps(self.canonical_pointcloud) 
         self._per_fingertip_cluster_counts = torch.zeros((self.L, self.cluster_k), dtype=torch.long, device=self.device)
 
 
@@ -142,6 +190,33 @@ class CuriosityRewardManager:
                 else:
                     new_centers[i] = centers[i]
             centers = new_centers
+
+        return labels
+    
+    def _perform_clustering_w_fps(self, pointcloud: torch.Tensor):
+        """
+        先用 FPS 选 k 个中心，再按最近中心聚类。
+        可选：refine_iters > 0 时进行少量 K-means 式的均值微调（把中心仍约束在点云上可改为“投影回最近点”）。
+
+        Returns:
+            labels:  (M,) long
+            centers: (k, D) float
+        """
+        M, _ = pointcloud.shape
+        k = min(self.cluster_k, M)
+        pts = pointcloud.to(torch.float32)
+
+        _, centers = fps(pts, k)
+        labels = _assign_labels_by_nn(pts, centers)
+
+        # 可选：小步微调中心（默认 0 轮）
+        for _ in range(self.max_clustering_iters):
+            counts = torch.bincount(labels, minlength=k).clamp_min(1).to(pts.dtype)  # (k,)
+            new_centers = torch.zeros_like(centers)
+            new_centers.index_add_(0, labels, pts)
+            new_centers = new_centers / counts.unsqueeze(1)
+            centers = new_centers
+            labels = _assign_labels_by_nn(pts, centers)
 
         return labels
 
