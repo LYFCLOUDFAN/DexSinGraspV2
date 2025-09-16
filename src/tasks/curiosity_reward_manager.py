@@ -611,6 +611,7 @@ class CuriosityRewardManager:
         bonus_term = contact_novelty_reward.mean(dim=1)
 
         reward = r_progress + contact_bonus * bonus_term
+        # reward = contact_bonus * bonus_term
 
         # viz
         self.last_P_target = P_target_world.detach().clone()

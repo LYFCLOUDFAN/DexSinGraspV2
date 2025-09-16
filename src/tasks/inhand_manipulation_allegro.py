@@ -22,6 +22,7 @@ import omegaconf
 import warnings
 from collections import OrderedDict, deque
 import random
+from .curiosity_reward_manager import CuriosityRewardManager
 
 
 class InhandManipulationAllegro(AllegroHand):
@@ -32,10 +33,10 @@ class InhandManipulationAllegro(AllegroHand):
     _allegro_hand_center_prim: str = "palm_link"
     _fingertips: List[str] = ["index_biotac_tip", "middle_biotac_tip", "ring_biotac_tip", "thumb_biotac_tip"] # index, middle, ring, thumb
     _keypoints: List[str] = [
-        "thumb_link_2", "thumb_link_3", "thumb_biotac_tip",  # thumb
-        "index_link_2", "index_link_3", "index_biotac_tip",     # finger 0 (index)
-        "middle_link_2", "middle_link_3", "middle_biotac_tip",     # finger 1 (middle)
-        "ring_link_2", "ring_link_3", "ring_biotac_tip",   # finger 2 (ring)
+        "thumb_link_2", "thumb_link_3", # thumb
+        "index_link_2", "index_link_3", # finger 0 (index)
+        "middle_link_2", "middle_link_3", # finger 1 (middle)
+        "ring_link_2", "ring_link_3", # finger 2 (ring)
         # "palm_link",
         # "thumb_link_0", "thumb_link_1", "thumb_link_2", "thumb_link_3", "thumb_biotac_tip",  # thumb
         # "index_link_0", "index_link_1", "index_link_2", "index_link_3", "index_biotac_tip",     # finger 0 (index)
@@ -260,6 +261,21 @@ class InhandManipulationAllegro(AllegroHand):
         for name in observation_space:
             self.observation_info[name] = self._get_observation_dim(name)
             
+        self.reach_curiosity_mgr = CuriosityRewardManager(
+            num_keypoints=len(self._keypoints),
+            device=self.device,
+            canonical_pointcloud=self.grasping_dataset._pointclouds[0], #NOTE: hardcode here, not per-env
+            k=8,  # highest point knn size
+            potential_sigma=0.05,
+            # contact reward parameters
+            contact_bonus=0.0,
+            per_contact=False,
+            # cluster parameters for contact reward
+            cluster_k=64,
+            max_clustering_iters=10,
+        )
+        self.enable_exploration_logging = self.cfg["env"].get("enableExplorationLogging", False)
+            
         # meaning less attributes, only for log in ppo.py
         self.object_codes = ["all"]
         self.label_paths = ["in_hand_manipulation_allegro"]
@@ -459,6 +475,10 @@ class InhandManipulationAllegro(AllegroHand):
 
     def reset_idx(self, env_ids: torch.LongTensor, first_time=False) -> None:
         super().reset_idx(env_ids, env_ids)
+        
+        if self.reach_curiosity_mgr.potential_per_kp_max is None:
+            self.reach_curiosity_mgr.potential_per_kp_max = torch.zeros((self.num_envs, len(self._keypoints)), dtype=torch.float, device=self.device) # NOTE: hardcore keypoint number
+        self.reach_curiosity_mgr.potential_per_kp_max[env_ids] = 0
         
     def compute_observations(self, reset_env_ids: Optional[torch.LongTensor] = None) -> None:
         """Compute the observations.
@@ -1012,6 +1032,96 @@ class InhandManipulationAllegro(AllegroHand):
         self.extras["keypoints_to_surface_dist_min"] = self.keypoints_to_surface_dist_min.clone()
         self.extras["reach_rew_keypoints"] = self.reach_rew_scaled_keypoints.clone()
         
+    def compute_palm_orientation_reward(self, sigma: float = 0.5):
+        """
+        Reward for aligning fingertip palm-side (local +x) toward the nearest object surface point.
+        """
+        pcl_world = self._get_target_surface_points_world()  # (N, P, 3)
+        energy_per_kp, theta_per_kp, _ = palm_alignment_energy(
+            # self.fingertip_positions,         # (N, L, 3)
+            # self.fingertip_orientations,      # (N, L, 4)
+            self.keypoint_positions,         # (N, L, 3)
+            self.keypoint_orientations,      # (N, L, 4)
+            pcl_world,                        # (N, P, 3)
+            sigma=sigma,
+        )
+
+        theta_mean = theta_per_kp.mean(dim=1)                  # (N,)
+        current_potential = torch.exp(-theta_mean / sigma)     # (N,)
+
+        if not hasattr(self, "prev_palm_alignment_energy") or (self.prev_palm_alignment_energy.shape != current_potential.shape):
+            self.prev_palm_alignment_energy = current_potential.detach().clone()
+
+        r_progress = (current_potential - self.prev_palm_alignment_energy) * 50
+        # r_progress = current_potential * 10
+        self.prev_palm_alignment_energy = current_potential.detach().clone()
+
+        self.extras["palm_alignment_theta_mean"] = theta_per_kp.mean(dim=1).clone()
+        self.extras["palm_alignment_energy_mean"] = current_potential.clone()
+        self.extras["palm_orientation_rew"] = r_progress.clone()
+
+        self.palm_alignment_theta = theta_per_kp
+        self.palm_alignment_energy = energy_per_kp
+        self.palm_orientation_rew = r_progress
+
+        return r_progress
+    
+    def compute_contact_filtered_keypoints_relative_pos(self):
+        """
+        Compute keypoint positions relative to the target object's center, filtered by contact.
+        Returns:
+            filtered_rel (Tensor): (N, 4, 3)
+            has_contact (BoolTensor): (N,) any keypoint satisfied both conditions
+        """
+        # Relative keypoint positions to object center: (N,4,3)
+        rel_pos = self.keypoint_positions_with_offset - self.object_root_positions.unsqueeze(1)
+
+        # Distance to nearest surface point per keypoint: (N,4,1)
+        _, r = self.compute_curiosity_observations_surface_all_keypoints()  # r: (N,4,1)
+
+
+        contact_mag = self.keypoint_contact_forces.norm(dim=-1, p=2)
+
+        # Contact filters
+        near_surface = (r.squeeze(-1) < 0.002)           # (N,4)
+        has_force = (contact_mag > 0.5)                 # (N,4)
+        contact_mask = near_surface & has_force         # (N,4)
+
+        # Apply mask
+        filtered_rel = rel_pos * contact_mask.unsqueeze(-1)  # (N,4,3)
+
+        has_contact = contact_mask.any(dim=1)  # (N,)
+        return filtered_rel, has_contact
+    
+    def compute_curiosity_informed_reach_reward(self):
+        """Compute reach reward - curiosity-informed version using fingertip positions.
+        """
+
+        # World keypoint positions
+        kp_pos_world = self.keypoint_positions_with_offset  # (N, L=4, 3)
+
+        filtered_rel, _ = self.compute_contact_filtered_keypoints_relative_pos()  # (N,4,3), (N,)
+        contact_mask = (filtered_rel.abs().sum(dim=-1) > 0)  # (N,4) bool
+        
+        canonical = self.reach_curiosity_mgr.canonical_pointcloud
+        pc_world = quat_rotate(self.object_root_orientations[:, None, :], canonical.unsqueeze(0).expand(self.num_envs, -1, -1)) \
+                + self.object_root_positions[:, None, :]  # (N,M,3)
+        # compute per-keypoint nearest canonical index in world frame
+        d = torch.cdist(self.keypoint_positions_with_offset, pc_world)        # (N,4,M)
+        contact_indices = d.argmin(dim=-1)                         # (N,4)
+
+        reward, info = self.reach_curiosity_mgr.compute_reward_from_canonical(
+            object_positions=self.object_root_positions,
+            object_orientations=self.object_root_orientations,
+            keypoint_positions_world=kp_pos_world,
+            contact_indices=contact_indices,
+            contact_mask=contact_mask,
+        )
+        
+        self.reach_curiosity_rew = reward
+        self.reach_curiosity_rew_scaled = self.reach_curiosity_rew * 100
+        self.extras["reach_curiosity_rew"] = self.reach_curiosity_rew_scaled.clone()
+        
     def compute_reward(self, actions):
         self.rew_buf[:], self.reset_buf[:], self.reset_goal_buf[:], self.progress_buf[:], self.successes[:], self.consecutive_successes[:] = compute_hand_reward(
             self.rew_buf, self.reset_buf, self.reset_goal_buf, self.progress_buf, self.successes, self.consecutive_successes,
@@ -1023,12 +1133,11 @@ class InhandManipulationAllegro(AllegroHand):
         
         self.task_reward = self.rew_buf.clone()
         self.extras["task_reward"] = self.task_reward.clone()
-        self.compute_reach_reward_keypoints(); 
-        self.reach_rew_scaled = self.reach_rew_scaled_keypoints.clone()
-        self.rew_buf[:] += self.reach_rew_scaled
+        self.compute_curiosity_informed_reach_reward()
+        self.rew_buf[:] += self.reach_curiosity_rew_scaled
         
-        self.curiosity_reward = self.compute_curiosity_reward()
-        self.rew_buf[:] += self.curiosity_reward
+        self.palm_alignment_rew = self.compute_palm_orientation_reward()
+        self.rew_buf[:] += self.palm_alignment_rew
 
         # self.extras['consecutive_successes'] = self.consecutive_successes.mean()
 
@@ -1114,6 +1223,56 @@ def compute_hand_reward(
     cons_successes = torch.where(num_resets > 0, av_factor*finished_cons_successes/num_resets + (1.0 - av_factor)*consecutive_successes, consecutive_successes)
 
     return reward, resets, goal_resets, progress_buf, successes, cons_successes
+
+
+@torch.no_grad()
+def palm_alignment_energy(
+    fingertip_positions: torch.Tensor,      # (N, L, 3)
+    link_orientations: torch.Tensor,        # (N, L, 4) [x,y,z,w]
+    surface_points: torch.Tensor,           # (N, P, 3)
+    sigma: float = 0.3,
+    eps: float = 1e-8,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Compute palm-alignment energy and angle per fingertip.
+    - Local x-axis is assumed to be the palm-facing axis in link-local frame.
+    - Energy per fingertip: exp(-theta / sigma), where theta is the angle between
+      the local x-axis (in world) and the vector from fingertip to nearest surface point.
+
+    Returns:
+      energy: (N, L) per-fingertip energy
+      theta:  (N, L) per-fingertip angle in radians
+      nn_idx: (N, L) nearest neighbor index in the surface point cloud
+    """
+    device = fingertip_positions.device
+    dtype = fingertip_positions.dtype
+    N, L, _ = fingertip_positions.shape
+
+    # Nearest surface point for each fingertip
+    dists = torch.cdist(fingertip_positions, surface_points)           # (N, L, P)
+    nn_idx = dists.argmin(dim=-1)                                      # (N, L)
+    nn_pts = torch.gather(
+        surface_points.unsqueeze(1).expand(-1, L, -1, -1),             # (N, L, P, 3)
+        2,
+        nn_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, 1, 3)        # (N, L, 1, 3)
+    ).squeeze(2)                                                        # (N, L, 3)
+
+    # Vector from fingertip to nearest surface point
+    v = nn_pts - fingertip_positions                                   # (N, L, 3)
+
+    # Local x-axis in world frame (x-axis points inward/palm direction)
+    x_local = torch.tensor([1.0, 0.0, 0.0], device=device, dtype=dtype).view(1, 1, 3).expand(N, L, 3)
+    x_world = quat_apply(link_orientations.reshape(-1, 4), x_local.reshape(-1, 3)).view(N, L, 3)
+
+    # Angle between v and x_world
+    v_n = v / (v.norm(dim=-1, keepdim=True).clamp_min(eps))
+    x_n = x_world / (x_world.norm(dim=-1, keepdim=True).clamp_min(eps))
+    cos_sim = (v_n * x_n).sum(dim=-1).clamp(-1.0, 1.0)                 # (N, L)
+    theta = torch.acos(cos_sim)                                        # (N, L)
+
+    # Energy-based alignment (higher is better)
+    energy = torch.exp(-theta / sigma)                                  # (N, L)
+    return energy, theta, nn_idx
 
 
 def compute_relative_pose(

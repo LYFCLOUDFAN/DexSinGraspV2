@@ -502,7 +502,7 @@ class ActorCritic(nn.Module):
         return state_batch, tactile_batch, pcl_batch, gf_batch
 
     def act(self, observations: torch.Tensor, states: Optional[torch.Tensor] = None):
-
+        actor_observations = observations.clone()
         if self.actor_obs_normalization:
             actor_observations = self.actor_obs_normalizer(observations)
 
@@ -520,7 +520,7 @@ class ActorCritic(nn.Module):
         if self.asymmetric:
             value = self.critic(states)
         else:
-            critic_observations = observations
+            critic_observations = observations.clone()
             if self.critic_obs_normalization:
                 critic_observations = self.critic_obs_normalizer(observations)
             value = self.forward_critic(critic_observations)

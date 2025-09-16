@@ -25,8 +25,8 @@ python src/train.py \
     --logdir='allegro_inhand_ppo' \
     --run_device_id=0 \
     --web_visualizer_port=-1 \
-    --con \
-    --model_dir=/home/nus/DexSinGraspV2/logs/PPO/09-06-02-08_allegro_inhand_ppo_objtype:all_labeltype:in_hand_manipulation_allegro_objnum:1_objcat:block_maxpercat:-1_geo:all_scale:all_envnum:4096_rewtype:task+curiosity_seed42 \
+    # --con \
+    # --model_dir=/home/nus/DexSinGraspV2/logs/PPO/09-06-02-08_allegro_inhand_ppo_objtype:all_labeltype:in_hand_manipulation_allegro_objnum:1_objcat:block_maxpercat:-1_geo:all_scale:all_envnum:4096_rewtype:task+curiosity_seed42 \
     # --model_dir=/home/nus/DexSinGraspV2/logs/PPO/09-06-21-37_allegro_inhand_ppo_objtype:all_labeltype:in_hand_manipulation_allegro_objnum:1_objcat:block_maxpercat:-1_geo:all_scale:all_envnum:4096_rewtype:task+curiosity_seed42 \
     # --model_dir=/home/nus/DexSinGraspV2/logs/PPO/08-12-17-05_xarm_allegro_singulation_ppo_objtype:all_labeltype:box_grid_singulation_objnum:5_objcat:box_maxpercat:-1_geo:all_scale:all_envnum:2048_rewtype:succrew+tilt+slide+neighbor+actionpen+curiosity_seed42 \
     # task.env.enableDebugVis=True \
