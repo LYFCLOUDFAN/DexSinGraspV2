@@ -39,10 +39,11 @@ learn:
   max_iterations: 40000
 
   # training params
-  normalize_input: False
-  normalize_value: False
+  normalize_input: True
+  normalize_value: True
   cliprange: 0.1 #0.2
   ent_coef: 0
+  reward_scale_value: 0.1
   nsteps: 12
   noptepochs: 2 #2 5
   nminibatches: 4 #8 4 # this is per agent
@@ -56,3 +57,4 @@ learn:
 
   log_interval: 1
   asymmetric: False
+  critic_mode: dual

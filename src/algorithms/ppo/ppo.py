@@ -1166,7 +1166,7 @@ class PPO:
                     mu_loss_low = torch.clamp_max(mu_batch + soft_bound, 0.0) ** 2
                     b_loss = (mu_loss_low + mu_loss_high).sum(axis=-1).mean()
                 else:
-                    b_loss = 0.0
+                    b_loss = torch.tensor(0.0, device=self.device)
 
                 loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean() + self.bounds_loss_coef * b_loss
 

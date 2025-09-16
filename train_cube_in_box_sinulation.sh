@@ -20,6 +20,7 @@ python src/train.py \
     sim_device=cuda:0 \
     rl_device=cuda:0 \
     physics_engine=physx \
+    --cfg_train=XArmAllegroHandCubeInBoxPPO \
     --seed=0 \
     --exp_name='PPO' \
     --logdir='cube_in_box_singulation_ppo_use_random_pre_pose_w_curiosity' \
