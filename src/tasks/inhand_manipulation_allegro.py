@@ -33,10 +33,10 @@ class InhandManipulationAllegro(AllegroHand):
     _allegro_hand_center_prim: str = "palm_link"
     _fingertips: List[str] = ["index_biotac_tip", "middle_biotac_tip", "ring_biotac_tip", "thumb_biotac_tip"] # index, middle, ring, thumb
     _keypoints: List[str] = [
-        "thumb_link_2", "thumb_link_3", # thumb
-        "index_link_2", "index_link_3", # finger 0 (index)
-        "middle_link_2", "middle_link_3", # finger 1 (middle)
-        "ring_link_2", "ring_link_3", # finger 2 (ring)
+        "thumb_link_2", "thumb_link_3", "thumb_biotac_tip", # thumb
+        "index_link_2", "index_link_3", "index_biotac_tip", # finger 0 (index)
+        "middle_link_2", "middle_link_3", "middle_biotac_tip", # finger 1 (middle)
+        "ring_link_2", "ring_link_3", "ring_biotac_tip", # finger 2 (ring)
         # "palm_link",
         # "thumb_link_0", "thumb_link_1", "thumb_link_2", "thumb_link_3", "thumb_biotac_tip",  # thumb
         # "index_link_0", "index_link_1", "index_link_2", "index_link_3", "index_biotac_tip",     # finger 0 (index)
@@ -1134,10 +1134,10 @@ class InhandManipulationAllegro(AllegroHand):
         self.task_reward = self.rew_buf.clone()
         self.extras["task_reward"] = self.task_reward.clone()
         self.compute_curiosity_informed_reach_reward()
-        self.rew_buf[:] += self.reach_curiosity_rew_scaled
+        # self.rew_buf[:] += self.reach_curiosity_rew_scaled
         
         self.palm_alignment_rew = self.compute_palm_orientation_reward()
-        self.rew_buf[:] += self.palm_alignment_rew
+        # self.rew_buf[:] += self.palm_alignment_rew
 
         # self.extras['consecutive_successes'] = self.consecutive_successes.mean()
 

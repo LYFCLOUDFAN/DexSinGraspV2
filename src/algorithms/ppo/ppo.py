@@ -841,29 +841,33 @@ class PPO:
                 
                 self.actor_critic.update_normalization(next_obs["obs"])
                 
-                shaped_rewards = self.reward_scale_value * rews.clone()
-                # add for value bootstrap if the episode ends because of timeout
-                if self.value_bootstrap and 'time_outs' in infos:
-                    shaped_rewards += self.gamma * values.squeeze(-1) * infos['time_outs'].float()
-                    
-                rewards = rews.unsqueeze(-1)
+                origin_rewards = rews.clone()
+                # rewards = rews.unsqueeze(-1)
                 if self.critic_mode == "dual":
                     cur = infos["curiosity_reward"].to(self.device).view(-1)
-                    rew_e = rews - cur
+                    rew_e = origin_rewards - cur
                     rew_i = cur
                     rewards = torch.stack([rew_e, rew_i], dim=-1)  # (N, 2)
                     # print(f"rew_e: {rew_e.mean()}, rew_i: {rew_i.mean()}")
                 else:
-                    rewards = shaped_rewards.unsqueeze(-1)
+                    rewards = origin_rewards.unsqueeze(-1)
+                    
+                scaled_rewards = self.reward_scale_value * rewards
+                    
+                # add for value bootstrap if the episode ends because of timeout
+                if self.value_bootstrap and 'time_outs' in infos:
+                    # assert self.critic_mode != "dual", "do not support dual critic mode with value bootstrap"
+                    # dual mode seems work now # !!! Now do not support dual critic mode
+                    scaled_rewards += self.gamma * values * infos['time_outs'].float().unsqueeze(-1)
 
                 # Record the transition
                 if self.critic_mode == "dual":
                     self.storage.add_transitions(
-                        storage_obs, current_states, actions, rewards, dones, values, actions_log_prob, mu, sigma
+                        storage_obs, current_states, actions, scaled_rewards, dones, values, actions_log_prob, mu, sigma
                     )
                 else:
                     self.storage.add_transitions(
-                        storage_obs, current_states, actions, rews, dones, values, actions_log_prob, mu, sigma
+                        storage_obs, current_states, actions, scaled_rewards, dones, values, actions_log_prob, mu, sigma
                     )
                     
                 current_obs.copy_(next_obs["obs"])
@@ -873,7 +877,7 @@ class PPO:
                 ep_infos.append(infos.copy())
 
                 if self.print_log:
-                    cur_reward_sum[:] += rewards if not self.critic_mode == "dual" else rewards[:, :1]
+                    cur_reward_sum[:] += scaled_rewards if not self.critic_mode == "dual" else scaled_rewards[:, :1]
                     cur_episode_length[:] += 1
                     done_indices = (dones > 0).nonzero(as_tuple=False)
                     not_dones = 1.0 - dones.float()
@@ -1057,8 +1061,8 @@ class PPO:
                 else:
                     states_batch = None
                 actions_batch = self.storage.actions.view(-1, self.storage.actions.size(-1))[indices]
-                target_values_batch = self.storage.values.view(-1, 1)[indices]
-                returns_batch = self.storage.returns.view(-1, 1)[indices]
+                # target_values_batch = self.storage.values.view(-1, 1)[indices]
+                # returns_batch = self.storage.returns.view(-1, 1)[indices]
                 if self.critic_mode == "dual":
                     target_values_batch = self.storage.values.view(-1, 2)[indices]
                     returns_batch = self.storage.returns.view(-1, 2)[indices]
@@ -1066,7 +1070,7 @@ class PPO:
                     target_values_batch = self.storage.values.view(-1, 1)[indices]
                     returns_batch = self.storage.returns.view(-1, 1)[indices]
                 old_actions_log_prob_batch = self.storage.actions_log_prob.view(-1, 1)[indices]
-                advantages_batch = self.storage.advantages.view(-1, 1)[indices]
+                # advantages_batch = self.storage.advantages.view(-1, 1)[indices]
                 if self.critic_mode == "dual":
                     advantages_batch = self.storage.combined_advantages.view(-1, 1)[indices]
                 else:
